@@ -527,17 +527,29 @@ class ZipExtractorGUI:
                 jpeg_file = self.pdf_to_jpeg(pdf_file)
                 self.logger.info(f"JPEG変換完了: {jpeg_file.name}")
                 
-                # Google Cloud Vision OCR
-                self.logger.info(f"OCR処理中: {pdf_file.name}")
-                ocr_text = self.perform_ocr(jpeg_file)
+                # まず全体をOCRして文書種別を判定
+                self.logger.info(f"初回OCR処理中: {pdf_file.name}")
+                initial_ocr_text = self.perform_ocr(jpeg_file)
+                
+                # 文書種別を判定
+                doc_type = self.determine_document_type(initial_ocr_text)
+                self.logger.info(f"文書種別判定: {doc_type}")
+                
+                # 文書種別に応じた処理
+                if doc_type == "払込取扱票":
+                    # 払込取扱票の場合のみ右側30%を追加OCR
+                    ocr_text = self.process_payment_slip_ocr(jpeg_file, initial_ocr_text, pdf_file)
+                else:
+                    # その他の文書は初回OCR結果をそのまま使用
+                    ocr_text = initial_ocr_text
                 
                 # OCR結果をログに記録（長すぎる場合は省略）
                 ocr_preview = ocr_text[:200] + "..." if len(ocr_text) > 200 else ocr_text
-                self.logger.info(f"OCR結果 ({len(ocr_text)}文字): {ocr_preview}")
+                self.logger.info(f"最終OCR結果 ({len(ocr_text)}文字): {ocr_preview}")
                 
                 # OpenAI APIでファイル名生成
                 self.logger.info(f"AI ファイル名生成中: {pdf_file.name}")
-                new_name = self.generate_filename_with_ai(ocr_text)
+                new_name = self.generate_filename_with_ai(ocr_text, doc_type)
                 self.logger.info(f"生成されたファイル名: {new_name}")
                 
                 # ファイルリネーム
@@ -561,6 +573,99 @@ class ZipExtractorGUI:
         
         self.logger.info("OCR&リネーム処理完了")
     
+    def determine_document_type(self, ocr_text):
+        """OCR結果から文書種別を判定"""
+        # 振替受払通知票の判定
+        if "振替受払通知票" in ocr_text and "貯金事務センター" in ocr_text:
+            return "振替受払通知票"
+        
+        # 振替受入明細書の判定
+        if "振替受入明細書" in ocr_text and "貯金事務センター" in ocr_text:
+            return "振替受入明細書"
+        
+        # 払込取扱票の判定
+        if "番号はお間違えないよう記入してください" in ocr_text:
+            return "払込取扱票"
+        
+        # どれにも該当しない場合
+        return "一般文書"
+    
+    def process_payment_slip_ocr(self, jpeg_file, initial_ocr_text, pdf_file):
+        """払込取扱票の場合の右側30%追加OCR処理"""
+        try:
+            self.logger.info(f"払込取扱票: 右側30%の追加OCR処理開始")
+            
+            # picturesフォルダを作成
+            pictures_dir = pdf_file.parent / "pictures"
+            pictures_dir.mkdir(exist_ok=True)
+            self.logger.info(f"picturesフォルダ作成: {pictures_dir}")
+            self.logger.info(f"picturesフォルダ存在確認: {pictures_dir.exists()}")
+            
+            # PIL（Pillow）で画像を読み込み
+            from PIL import Image
+            
+            self.logger.info(f"元画像ファイル読み込み: {jpeg_file}")
+            self.logger.info(f"元画像ファイル存在確認: {jpeg_file.exists()}")
+            
+            with Image.open(jpeg_file) as img:
+                width, height = img.size
+                self.logger.info(f"元画像サイズ: {width}x{height}")
+                
+                # 右側30%の範囲を計算
+                left_boundary = int(width * 0.7)
+                right_box = (left_boundary, 0, width, height)
+                
+                self.logger.info(f"右側30%分割範囲: {right_box}")
+                
+                # 右側30%を切り出し
+                right_img = img.crop(right_box)
+                self.logger.info(f"画像切り出し完了: {right_img.size}")
+                
+                # picturesフォルダに保存
+                right_file = pictures_dir / f"{pdf_file.stem}_right30.jpg"
+                self.logger.info(f"保存先パス: {right_file}")
+                
+                # 画像を保存
+                right_img.save(right_file, 'JPEG', quality=95)
+                self.logger.info(f"右側30%画像保存完了: {right_file}")
+                self.logger.info(f"保存ファイル存在確認: {right_file.exists()}")
+                
+                if right_file.exists():
+                    file_size = right_file.stat().st_size
+                    self.logger.info(f"保存ファイルサイズ: {file_size} bytes")
+                else:
+                    self.logger.error(f"ファイル保存に失敗: {right_file}")
+            
+            # 右側30%のOCR実行
+            if right_file.exists():
+                self.logger.info(f"右側30%OCR実行: {right_file.name}")
+                client = vision.ImageAnnotatorClient()
+                
+                with open(right_file, 'rb') as image_file_obj:
+                    content = image_file_obj.read()
+                
+                image = vision.Image(content=content)
+                response = client.text_detection(image=image)
+                right_text = response.text_annotations[0].description if response.text_annotations else ""
+                self.logger.info(f"右側30%OCR結果: {len(right_text)}文字")
+                
+                # 初回OCR結果と右側OCR結果を結合
+                combined_text = f"{initial_ocr_text}\n\n--- 右側30%領域 ---\n\n{right_text}"
+                self.logger.info(f"OCR結果結合完了: 合計{len(combined_text)}文字")
+                
+                return combined_text
+            else:
+                self.logger.error("右側30%画像ファイルが作成されていないため、OCRをスキップ")
+                return initial_ocr_text
+            
+        except Exception as e:
+            self.logger.error(f"払込取扱票右側OCR処理エラー: {e}")
+            import traceback
+            self.logger.error(f"エラー詳細: {traceback.format_exc()}")
+            # エラー時は初回OCR結果をそのまま返す
+            self.logger.info("右側OCRエラーのため初回OCR結果を使用")
+            return initial_ocr_text
+    
     def pdf_to_jpeg(self, pdf_file):
         """PDFをJPEGに変換"""
         try:
@@ -581,10 +686,88 @@ class ZipExtractorGUI:
             self.logger.error(f"PDF→JPEG変換エラー ({pdf_file.name}): {e}")
             raise Exception(f"PDF→JPEG変換エラー: {str(e)}")
     
-    def perform_ocr(self, image_file):
-        """Google Cloud Vision OCRを実行"""
+    def perform_split_ocr(self, image_file):
+        """画像を左右に分割してOCRを実行"""
         try:
-            self.logger.info(f"OCR処理開始: {image_file.name}")
+            self.logger.info(f"画像分割OCR開始: {image_file.name}")
+            
+            # PIL（Pillow）で画像を読み込み
+            from PIL import Image
+            
+            with Image.open(image_file) as img:
+                width, height = img.size
+                self.logger.info(f"元画像サイズ: {width}x{height}")
+                
+                # 左側70%の範囲を計算
+                left_width = int(width * 0.7)
+                left_box = (0, 0, left_width, height)
+                
+                # 右側30%の範囲を計算  
+                right_box = (left_width, 0, width, height)
+                
+                self.logger.info(f"左側分割範囲: {left_box}")
+                self.logger.info(f"右側分割範囲: {right_box}")
+                
+                # 左右に分割
+                left_img = img.crop(left_box)
+                right_img = img.crop(right_box)
+                
+                # 一時ファイルとして保存
+                left_file = image_file.parent / f"{image_file.stem}_left.jpg"
+                right_file = image_file.parent / f"{image_file.stem}_right.jpg"
+                
+                left_img.save(left_file, 'JPEG', quality=95)
+                right_img.save(right_file, 'JPEG', quality=95)
+                
+                self.logger.info(f"分割画像保存: {left_file.name}, {right_file.name}")
+            
+            # Google Cloud Vision クライアント初期化
+            client = vision.ImageAnnotatorClient()
+            
+            # 左側画像のOCR
+            self.logger.info(f"左側画像OCR実行: {left_file.name}")
+            with open(left_file, 'rb') as image_file_obj:
+                content = image_file_obj.read()
+            
+            image = vision.Image(content=content)
+            response = client.text_detection(image=image)
+            left_text = response.text_annotations[0].description if response.text_annotations else ""
+            self.logger.info(f"左側OCR結果: {len(left_text)}文字")
+            
+            # 右側画像のOCR
+            self.logger.info(f"右側画像OCR実行: {right_file.name}")
+            with open(right_file, 'rb') as image_file_obj:
+                content = image_file_obj.read()
+            
+            image = vision.Image(content=content)
+            response = client.text_detection(image=image)
+            right_text = response.text_annotations[0].description if response.text_annotations else ""
+            self.logger.info(f"右側OCR結果: {len(right_text)}文字")
+            
+            # 結果を結合
+            combined_text = f"{left_text}\n\n--- 右側領域 ---\n\n{right_text}"
+            self.logger.info(f"結合OCR結果: {len(combined_text)}文字")
+            
+            # 一時ファイルを削除
+            if left_file.exists():
+                left_file.unlink()
+                self.logger.info(f"一時ファイル削除: {left_file.name}")
+            if right_file.exists():
+                right_file.unlink()
+                self.logger.info(f"一時ファイル削除: {right_file.name}")
+            
+            return combined_text
+            
+        except Exception as e:
+            self.logger.error(f"画像分割OCR処理エラー ({image_file.name}): {e}")
+            # エラー時は従来のOCRにフォールバック
+            self.logger.info("従来のOCR方式にフォールバック")
+            return self.perform_ocr(image_file)
+    
+    def perform_ocr(self, image_file):
+        """Google Cloud Vision OCRを実行（フォールバック用）"""
+        try:
+            self.logger.info(f"通常OCR処理開始: {image_file.name}")
             
             # Google Cloud Vision クライアント初期化
             client = vision.ImageAnnotatorClient()
@@ -611,10 +794,10 @@ class ZipExtractorGUI:
             self.logger.error(f"OCR処理エラー ({image_file.name}): {e}")
             raise Exception(f"OCR処理エラー: {str(e)}")
     
-    def generate_filename_with_ai(self, ocr_text):
+    def generate_filename_with_ai(self, ocr_text, doc_type):
         """OpenAI APIを使用してファイル名を生成"""
         try:
-            self.logger.info(f"AI ファイル名生成開始 (入力: {len(ocr_text)}文字)")
+            self.logger.info(f"AI ファイル名生成開始 (入力: {len(ocr_text)}文字, 文書種別: {doc_type})")
             
             # OpenAI APIキーを環境変数から取得
             api_key = os.getenv('OPENAI_API_KEY')
@@ -624,22 +807,16 @@ class ZipExtractorGUI:
             
             client = OpenAI(api_key=api_key)
             
-            # 払込取扱票の判定（複数のキーワードで判定）
-            payment_keywords = [
-                "口座記号番号はお間違えのないよう記入してください",
-                "口座記号・番号はお間違えのないよう記入してください", 
-                "払达取扱",
-                "払込取扱票",
-                "ご依頼人欄",
-                "通信欄"
-            ]
-            
-            is_payment_slip = any(keyword in ocr_text for keyword in payment_keywords)
-            
-            if is_payment_slip:
-                self.logger.info("払込取扱票を検出 - 専用フォーマットでファイル名生成")
-                self.logger.info(f"検出されたキーワード: {[kw for kw in payment_keywords if kw in ocr_text]}")
+            # 文書種別に応じた処理分岐
+            if doc_type == "払込取扱票":
+                self.logger.info("払込取扱票として処理")
                 return self.generate_payment_slip_filename(client, ocr_text)
+            elif doc_type == "振替受払通知票":
+                self.logger.info("振替受払通知票として処理")
+                return self.generate_transfer_notification_filename(client, ocr_text)
+            elif doc_type == "振替受入明細書":
+                self.logger.info("振替受入明細書として処理")
+                return self.generate_transfer_detail_filename(client, ocr_text)
             else:
                 self.logger.info("一般文書として処理")
                 return self.generate_general_filename(client, ocr_text)
@@ -648,6 +825,113 @@ class ZipExtractorGUI:
             self.logger.error(f"AI ファイル名生成エラー: {e}")
             print(f"AI ファイル名生成エラー: {e}")
             return None
+    
+    def generate_transfer_notification_filename(self, client, ocr_text):
+        """振替受払通知票専用のファイル名生成"""
+        prompt = f"""
+以下は振替受払通知票のOCRテキストです。この内容から以下の情報を抽出してファイル名を生成してください：
+
+OCRテキスト:
+{ocr_text}
+
+抽出する情報:
+1. 処理年月日
+2. 受払内容（何の支払いか）
+3. 金額
+
+出力フォーマット（必ずこの形式で回答してください）:
+YYYY年MM月DD日 振替受払通知票 [受払内容] 金額[金額]円
+
+例: 2024年12月26日 振替受払通知票 護持会費 金額5000円
+
+注意事項:
+- 日付は西暦で統一
+- 受払内容は簡潔に
+- 金額はカンマなしの数字のみ
+- 各項目は半角スペースで区切る
+- 上記フォーマット以外は出力しない
+
+ファイル名:
+"""
+        
+        self.logger.info(f"振替受払通知票用プロンプト送信")
+        
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "あなたは振替受払通知票から情報を抽出してファイル名を生成する専門アシスタントです。"},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=150,
+            temperature=0.1
+        )
+        
+        filename = response.choices[0].message.content.strip()
+        self.logger.info(f"振替受払通知票ファイル名生成: {filename}")
+        
+        return self.sanitize_filename(filename)
+    
+    def generate_transfer_detail_filename(self, client, ocr_text):
+        """振替受入明細書専用のファイル名生成"""
+        prompt = f"""
+以下は振替受入明細書のOCRテキストです。この内容から以下の情報を抽出してファイル名を生成してください：
+
+OCRテキスト:
+{ocr_text}
+
+抽出する情報:
+1. 処理年月日
+2. 受入内容（何の受入か）
+3. 金額
+
+出力フォーマット（必ずこの形式で回答してください）:
+YYYY年MM月DD日 振替受入明細書 [受入内容] 金額[金額]円
+
+例: 2024年12月26日 振替受入明細書 護持会費 金額5000円
+
+注意事項:
+- 日付は西暦で統一
+- 受入内容は簡潔に
+- 金額はカンマなしの数字のみ
+- 各項目は半角スペースで区切る
+- 上記フォーマット以外は出力しない
+
+ファイル名:
+"""
+        
+        self.logger.info(f"振替受入明細書用プロンプト送信")
+        
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "あなたは振替受入明細書から情報を抽出してファイル名を生成する専門アシスタントです。"},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=150,
+            temperature=0.1
+        )
+        
+        filename = response.choices[0].message.content.strip()
+        self.logger.info(f"振替受入明細書ファイル名生成: {filename}")
+        
+        return self.sanitize_filename(filename)
+    
+    def sanitize_filename(self, filename):
+        """ファイル名のサニタイズ処理"""
+        # ファイルシステムで使用できない文字を除去（アンダースコアは除外）
+        invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+        original_filename = filename
+        for char in invalid_chars:
+            filename = filename.replace(char, '_')
+        
+        if original_filename != filename:
+            self.logger.info(f"無効文字を置換: {original_filename} → {filename}")
+        
+        final_filename = filename[:50]  # 50文字制限
+        if len(filename) > 50:
+            self.logger.info(f"ファイル名を50文字に短縮: {filename} → {final_filename}")
+        
+        return final_filename
     
     def generate_payment_slip_filename(self, client, ocr_text):
         """払込取扱票専用のファイル名生成"""
@@ -710,7 +994,7 @@ OCRテキスト:
         if len(filename) > 50:
             self.logger.info(f"ファイル名を50文字に短縮: {filename} → {final_filename}")
         
-        return final_filename
+        return self.sanitize_filename(filename)
     
     def generate_general_filename(self, client, ocr_text):
         """一般文書用のファイル名生成"""
@@ -746,20 +1030,7 @@ OCRテキスト:
         filename = response.choices[0].message.content.strip()
         self.logger.info(f"一般文書ファイル名生成: {filename}")
         
-        # ファイルシステムで使用できない文字を除去
-        invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
-        original_filename = filename
-        for char in invalid_chars:
-            filename = filename.replace(char, '_')
-        
-        if original_filename != filename:
-            self.logger.info(f"無効文字を置換: {original_filename} → {filename}")
-        
-        final_filename = filename[:50]  # 50文字制限
-        if len(filename) > 50:
-            self.logger.info(f"ファイル名を50文字に短縮: {filename} → {final_filename}")
-        
-        return final_filename
+        return self.sanitize_filename(filename)
     
     def rename_pdf_file(self, pdf_file, new_name):
         """PDFファイルをリネーム"""
