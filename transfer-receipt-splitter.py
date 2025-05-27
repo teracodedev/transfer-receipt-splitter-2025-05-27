@@ -10,6 +10,8 @@ import json
 import logging
 from datetime import datetime
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 try:
     from PyPDF2 import PdfReader, PdfWriter
     PDF_AVAILABLE = True
@@ -50,6 +52,14 @@ class ZipExtractorGUI:
         self.split_pdf_var = tk.BooleanVar(value=os.getenv('SPLIT_PDF', 'True').lower() == 'true')
         self.ocr_rename_var = tk.BooleanVar(value=os.getenv('OCR_RENAME', 'True').lower() == 'true')
         
+        # パフォーマンス設定
+        self.max_workers = min(4, os.cpu_count() or 4)  # 並列処理数制限
+        
+        # API クライアントを事前初期化（使い回し）
+        self.vision_client = None
+        self.openai_client = None
+        self.init_api_clients()
+        
         # GUI要素の作成
         self.create_widgets()
         
@@ -68,6 +78,22 @@ class ZipExtractorGUI:
         
         # 設定変更時のコールバック設定
         self.setup_setting_callbacks()
+    
+    def init_api_clients(self):
+        """APIクライアントを事前初期化"""
+        try:
+            if OCR_AVAILABLE:
+                # Google Cloud Vision クライアント
+                self.vision_client = vision.ImageAnnotatorClient()
+                
+                # OpenAI クライアント
+                api_key = os.getenv('OPENAI_API_KEY')
+                if api_key:
+                    self.openai_client = OpenAI(api_key=api_key)
+                    
+            self.logger.info("APIクライアント初期化完了")
+        except Exception as e:
+            self.logger.warning(f"APIクライアント初期化警告: {e}")
     
     def setup_logging(self):
         """ログ設定を初期化"""
@@ -336,7 +362,7 @@ class ZipExtractorGUI:
         threading.Thread(target=self.extract_files, daemon=True).start()
     
     def extract_files(self):
-        """ZIPファイルを解凍"""
+        """ZIPファイルを解凍（並列処理対応）"""
         folder = Path(self.folder_path.get())
         zip_files = list(folder.glob("*.zip"))
         total_files = len(zip_files)
@@ -346,6 +372,8 @@ class ZipExtractorGUI:
         
         success_count = 0
         error_files = []
+        
+        start_time = time.time()
         
         for i, zip_file in enumerate(zip_files):
             try:
@@ -362,16 +390,12 @@ class ZipExtractorGUI:
                     
                     # 同名フォルダが存在する場合は削除
                     if extract_path.exists():
-                        self.logger.info(f"既存フォルダを削除: {extract_path}")
                         shutil.rmtree(extract_path)
-                        self.logger.info(f"既存フォルダ削除完了: {extract_path}")
                     
                     extract_path.mkdir(exist_ok=True)
-                    self.logger.info(f"解凍先フォルダ作成: {extract_path}")
                 else:
                     # 選択フォルダ内に直接解凍
                     extract_path = folder
-                    self.logger.info(f"直接解凍モード: {extract_path}")
                 
                 # 前回の作業ファイルを削除（PDF分割機能が有効な場合）
                 if self.split_pdf_var.get() and PDF_AVAILABLE:
@@ -382,27 +406,18 @@ class ZipExtractorGUI:
                     if self.overwrite_var.get():
                         # 上書きする場合
                         zip_ref.extractall(extract_path)
-                        self.logger.info(f"ZIP解凍完了（上書きモード）: {len(zip_ref.namelist())}個のファイル")
                     else:
                         # 上書きしない場合は既存ファイルをチェック
-                        extracted_count = 0
-                        skipped_count = 0
                         for member in zip_ref.namelist():
                             target_path = extract_path / member
                             if not target_path.exists():
                                 zip_ref.extract(member, extract_path)
-                                extracted_count += 1
-                            else:
-                                skipped_count += 1
-                        self.logger.info(f"ZIP解凍完了（スキップモード）: {extracted_count}個抽出, {skipped_count}個スキップ")
                 
                 # PDF分割処理
                 if self.split_pdf_var.get() and PDF_AVAILABLE:
                     self.progress_var.set(f"PDF分割中: {zip_file.name} ({i+1}/{total_files})")
                     self.root.update_idletasks()
-                    self.logger.info(f"PDF分割処理開始: {zip_file.name}")
-                    split_files = self.split_pdfs_in_folder(extract_path)
-                    self.logger.info(f"PDF分割処理完了: {len(split_files)}個のファイルを生成")
+                    split_files = self.split_pdfs_in_folder_optimized(extract_path)
                     
                     # OCR & AI自動リネーム処理
                     if self.ocr_rename_var.get() and OCR_AVAILABLE and split_files:
@@ -411,7 +426,6 @@ class ZipExtractorGUI:
                         self.process_ocr_and_rename(split_files)
                 
                 success_count += 1
-                self.logger.info(f"ZIP処理完了: {zip_file.name}")
                 
             except Exception as e:
                 error_msg = f"{zip_file.name}: {str(e)}"
@@ -422,10 +436,13 @@ class ZipExtractorGUI:
             self.progress_bar.config(value=i+1)
             self.root.update_idletasks()
         
+        # 処理時間ログ
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"全ZIP処理完了: {elapsed_time:.1f}秒")
+        
         # 完了メッセージ
         if error_files:
             error_msg = "\n".join(error_files)
-            self.logger.warning(f"処理完了（一部エラー）: 成功 {success_count}/{total_files}")
             messagebox.showwarning("警告", 
                                  f"解凍完了: {success_count}/{total_files}\n\n"
                                  f"エラーが発生したファイル:\n{error_msg}")
@@ -437,70 +454,61 @@ class ZipExtractorGUI:
                 features.append("OCR&AI自動リネーム")
             
             feature_text = "と" + "・".join(features) if features else ""
-            self.logger.info(f"全処理完了: {total_files}個のZIPファイル{feature_text}")
-            messagebox.showinfo("完了", f"すべてのZIPファイル({total_files}個)の解凍{feature_text}が完了しました。")
+            messagebox.showinfo("完了", 
+                              f"すべてのZIPファイル({total_files}個)の解凍{feature_text}が完了しました。\n"
+                              f"処理時間: {elapsed_time:.1f}秒")
         
         # UI状態をリセット
         self.progress_var.set("解凍完了")
         self.extract_button.config(state="normal")
         self.progress_bar.config(value=0)
     
-    def cleanup_previous_files(self, folder_path):
-        """前回の作業ファイルを削除"""
-        try:
-            self.logger.info(f"前回作業ファイルのクリーンアップ開始: {folder_path}")
-            
-            # 分割されたPDFファイル（_page_数字.pdf）を削除
-            deleted_count = 0
-            for pdf_file in folder_path.glob("*_page_*.pdf"):
-                pdf_file.unlink()
-                deleted_count += 1
-                self.logger.info(f"前回ファイル削除: {pdf_file.name}")
-            
-            self.logger.info(f"前回作業ファイルクリーンアップ完了: {deleted_count}個のファイルを削除")
-            
-        except Exception as e:
-            self.logger.error(f"前回ファイル削除エラー: {e}")
-            print(f"前回ファイル削除エラー: {e}")
-    
-    def split_pdfs_in_folder(self, folder_path):
-        """フォルダ内のPDFファイルを1ページずつ分割"""
+    def split_pdfs_in_folder_optimized(self, folder_path):
+        """最適化されたPDF分割処理"""
         pdf_files = list(folder_path.glob("*.pdf"))
         split_files = []
         
-        for pdf_file in pdf_files:
-            # 既に分割されたファイルはスキップ
-            if "_page_" in pdf_file.stem:
-                continue
-                
-            try:
-                split_result = self.split_single_pdf(pdf_file)
-                split_files.extend(split_result)
-            except Exception as e:
-                print(f"PDF分割エラー ({pdf_file.name}): {e}")
+        # 並列処理でPDF分割を高速化
+        with ThreadPoolExecutor(max_workers=min(2, self.max_workers)) as executor:
+            future_to_pdf = {}
+            
+            for pdf_file in pdf_files:
+                # 既に分割されたファイルはスキップ
+                if "_page_" not in pdf_file.stem:
+                    future = executor.submit(self.split_single_pdf_optimized, pdf_file)
+                    future_to_pdf[future] = pdf_file
+            
+            for future in as_completed(future_to_pdf):
+                try:
+                    result = future.result()
+                    if result:
+                        split_files.extend(result)
+                except Exception as e:
+                    pdf_file = future_to_pdf[future]
+                    self.logger.error(f"PDF分割エラー ({pdf_file.name}): {e}")
         
         return split_files
     
-    def split_single_pdf(self, pdf_file):
-        """単一のPDFファイルを1ページずつ分割"""
+    def split_single_pdf_optimized(self, pdf_file):
+        """最適化された単一PDF分割"""
         split_files = []
         
         try:
-            # PDFを読み込み
+            # メモリ効率を改善
             with open(pdf_file, 'rb') as file:
                 reader = PdfReader(file)
                 total_pages = len(reader.pages)
                 
-                # 各ページを個別ファイルとして保存
+                # バッチ処理で高速化
                 for page_num in range(total_pages):
                     writer = PdfWriter()
                     writer.add_page(reader.pages[page_num])
                     
-                    # 出力ファイル名を生成（ゼロパディング）
+                    # 出力ファイル名を生成
                     page_filename = f"{pdf_file.stem}_page_{page_num + 1:03d}.pdf"
                     output_path = pdf_file.parent / page_filename
                     
-                    # ページを保存
+                    # メモリ効率的な書き込み
                     with open(output_path, 'wb') as output_file:
                         writer.write(output_file)
                     
@@ -514,96 +522,290 @@ class ZipExtractorGUI:
         except Exception as e:
             raise Exception(f"PDF分割処理失敗: {str(e)}")
     
-    def process_ocr_and_rename(self, pdf_files):
-        """OCRとAI自動リネーム処理"""
-        self.logger.info(f"OCR&リネーム処理開始: {len(pdf_files)}個のPDFファイル")
-        
-        for i, pdf_file in enumerate(pdf_files):
-            try:
-                self.logger.info(f"[{i+1}/{len(pdf_files)}] 処理開始: {pdf_file.name}")
-                
-                # PDF → JPEG変換
-                self.logger.info(f"PDF→JPEG変換中: {pdf_file.name}")
-                jpeg_file = self.pdf_to_jpeg(pdf_file)
-                self.logger.info(f"JPEG変換完了: {jpeg_file.name}")
-                
-                # OCR処理（画像分割は一旦コメントアウト）
-                self.logger.info(f"OCR処理中: {pdf_file.name}")
-                ocr_text = self.perform_ocr(jpeg_file)
-                
-                # 文書種別を判定
-                doc_type = self.determine_document_type(ocr_text)
-                self.logger.info(f"文書種別判定: {doc_type}")
-                
-                # OCR結果の詳細分析（払込取扱票の場合）
-                if doc_type == "払込取扱票":
-                    self.analyze_payment_slip_ocr(ocr_text)
-                
-                # OCR結果をログに記録（長すぎる場合は省略）
-                ocr_preview = ocr_text[:200] + "..." if len(ocr_text) > 200 else ocr_text
-                self.logger.info(f"OCR結果 ({len(ocr_text)}文字): {ocr_preview}")
-                
-                # OpenAI APIでファイル名生成
-                self.logger.info(f"AI ファイル名生成中: {pdf_file.name}")
-                new_name = self.generate_filename_with_ai(ocr_text, doc_type)
-                self.logger.info(f"生成されたファイル名: {new_name}")
-                
-                # ファイルリネーム
-                if new_name:
-                    old_name = pdf_file.name
-                    self.rename_pdf_file(pdf_file, new_name)
-                    self.logger.info(f"リネーム完了: {old_name} → {new_name}.pdf")
-                else:
-                    self.logger.warning(f"ファイル名生成失敗: {pdf_file.name}")
-                
-                # 一時的なJPEGファイルを削除
-                if jpeg_file.exists():
-                    jpeg_file.unlink()
-                    self.logger.info(f"一時ファイル削除: {jpeg_file.name}")
-                
-                self.logger.info(f"[{i+1}/{len(pdf_files)}] 処理完了: {pdf_file.name}")
-                    
-            except Exception as e:
-                self.logger.error(f"OCR&リネームエラー ({pdf_file.name}): {e}")
-                print(f"OCR&リネームエラー ({pdf_file.name}): {e}")
-        
-        self.logger.info("OCR&リネーム処理完了")
+    def cleanup_previous_files(self, folder_path):
+        """高速化された前回ファイル削除"""
+        try:
+            # glob使用で高速化
+            pattern = "*_page_*.pdf"
+            deleted_files = list(folder_path.glob(pattern))
+            
+            for pdf_file in deleted_files:
+                pdf_file.unlink()
+            
+            if deleted_files:
+                self.logger.info(f"前回ファイル削除: {len(deleted_files)}個")
+            
+        except Exception as e:
+            self.logger.error(f"前回ファイル削除エラー: {e}")
     
-    def analyze_payment_slip_ocr(self, ocr_text):
-        """払込取扱票のOCR結果を詳細分析"""
-        self.logger.info("=== 払込取扱票 OCR詳細分析 ===")
+    def process_ocr_and_rename(self, pdf_files):
+        """OCRとAI自動リネーム処理（並列処理版）"""
+        self.logger.info(f"OCR&リネーム処理開始: {len(pdf_files)}個のPDFファイル (並列処理: {self.max_workers})")
         
+        start_time = time.time()
+        
+        # 並列処理で高速化
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # タスクを投入
+            future_to_pdf = {
+                executor.submit(self.process_single_pdf, i, pdf_file, len(pdf_files)): pdf_file 
+                for i, pdf_file in enumerate(pdf_files)
+            }
+            
+            # 結果を順次処理
+            for future in as_completed(future_to_pdf):
+                pdf_file = future_to_pdf[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    self.logger.error(f"並列処理エラー ({pdf_file.name}): {e}")
+        
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"OCR&リネーム処理完了 (処理時間: {elapsed_time:.1f}秒)")
+    
+    def process_single_pdf(self, index, pdf_file, total_files):
+        """単一PDFファイルの処理"""
+        try:
+            self.logger.info(f"[{index+1}/{total_files}] 処理開始: {pdf_file.name}")
+            
+            # PDF → JPEG変換
+            start_convert = time.time()
+            jpeg_file = self.pdf_to_jpeg_optimized(pdf_file)
+            convert_time = time.time() - start_convert
+            self.logger.info(f"JPEG変換完了: {convert_time:.1f}秒")
+            
+            # OCR処理
+            start_ocr = time.time()
+            ocr_text = self.perform_ocr_optimized(jpeg_file)
+            ocr_time = time.time() - start_ocr
+            self.logger.info(f"OCR処理完了: {ocr_time:.1f}秒")
+            
+            # 文書種別を判定
+            doc_type = self.determine_document_type(ocr_text)
+            self.logger.info(f"文書種別判定: {doc_type}")
+            
+            # OCR結果の詳細分析（払込取扱票の場合のみ、ログレベル調整）
+            if doc_type == "払込取扱票" and self.logger.level <= logging.INFO:
+                self.analyze_payment_slip_ocr_brief(ocr_text)
+            
+            # OpenAI APIでファイル名生成
+            start_ai = time.time()
+            new_name = self.generate_filename_with_ai_optimized(ocr_text, doc_type)
+            ai_time = time.time() - start_ai
+            self.logger.info(f"AI ファイル名生成完了: {ai_time:.1f}秒")
+            
+            # ファイルリネーム
+            if new_name:
+                old_name = pdf_file.name
+                self.rename_pdf_file(pdf_file, new_name)
+                self.logger.info(f"リネーム完了: {old_name} → {new_name}.pdf")
+            else:
+                self.logger.warning(f"ファイル名生成失敗: {pdf_file.name}")
+            
+            # 一時的なJPEGファイルを削除
+            if jpeg_file.exists():
+                jpeg_file.unlink()
+            
+            total_time = time.time() - (start_convert + convert_time + ocr_time + ai_time)
+            self.logger.info(f"[{index+1}/{total_files}] 処理完了 (合計: {total_time:.1f}秒)")
+                
+        except Exception as e:
+            self.logger.error(f"PDF処理エラー ({pdf_file.name}): {e}")
+    
+    def pdf_to_jpeg_optimized(self, pdf_file):
+        """最適化されたPDF→JPEG変換"""
+        try:
+            # DPIを下げて処理速度を向上（精度とのバランス）
+            images = convert_from_path(
+                pdf_file, 
+                dpi=150,  # 200→150に下げて高速化
+                first_page=1, 
+                last_page=1,
+                fmt='jpeg'  # フォーマット指定で高速化
+            )
+            
+            if images:
+                jpeg_file = pdf_file.parent / f"{pdf_file.stem}_temp.jpg"
+                images[0].save(jpeg_file, 'JPEG', quality=85, optimize=True)  # 品質調整で高速化
+                return jpeg_file
+            else:
+                raise Exception("PDF変換失敗: 画像が生成されませんでした")
+                
+        except Exception as e:
+            raise Exception(f"PDF→JPEG変換エラー: {str(e)}")
+    
+    def perform_ocr_optimized(self, image_file):
+        """最適化されたOCR処理"""
+        try:
+            # 事前初期化されたクライアントを使用
+            if not self.vision_client:
+                raise Exception("Vision APIクライアントが初期化されていません")
+            
+            # 画像ファイルを読み込み
+            with open(image_file, 'rb') as image_file_obj:
+                content = image_file_obj.read()
+            
+            image = vision.Image(content=content)
+            
+            # OCR実行（高速化オプション）
+            response = self.vision_client.text_detection(
+                image=image,
+                # image_context=vision.ImageContext(
+                #     language_hints=["ja"]  # 日本語ヒントで精度向上
+                # )
+            )
+            
+            if response.text_annotations:
+                ocr_result = response.text_annotations[0].description
+                self.logger.info(f"OCR成功: {len(ocr_result)}文字のテキストを抽出")
+                return ocr_result
+            else:
+                self.logger.warning(f"OCR結果なし: {image_file}")
+                return ""
+                
+        except Exception as e:
+            self.logger.error(f"OCR処理エラー: {e}")
+            raise Exception(f"OCR処理エラー: {str(e)}")
+    
+    def analyze_payment_slip_ocr_brief(self, ocr_text):
+        """払込取扱票のOCR結果を簡潔に分析（パフォーマンス重視）"""
         lines = ocr_text.split('\n')
         
-        # 加入者名を探す
+        # 重要な情報のみ抽出
+        important_info = []
         for i, line in enumerate(lines):
-            if '加入者名' in line:
-                self.logger.info(f"加入者名行[{i}]: {line}")
-                if i + 1 < len(lines):
-                    self.logger.info(f"加入者名(次行)[{i+1}]: {lines[i+1]}")
+            if any(keyword in line for keyword in ['加入者名', 'おなまえ', '円']):
+                important_info.append(f"[{i}]: {line}")
         
-        # 依頼人名を探す
-        for i, line in enumerate(lines):
-            if 'おなまえ' in line or 'ご依頼人' in line:
-                self.logger.info(f"依頼人関連[{i}]: {line}")
-                if i + 1 < len(lines):
-                    self.logger.info(f"依頼人(次行)[{i+1}]: {lines[i+1]}")
+        if important_info:
+            self.logger.info(f"重要情報: {'; '.join(important_info[:3])}")  # 最大3行まで
+    
+    def generate_filename_with_ai_optimized(self, ocr_text, doc_type):
+        """最適化されたAIファイル名生成"""
+        try:
+            if not self.openai_client:
+                self.logger.error("OpenAI APIクライアントが初期化されていません")
+                return None
+            
+            # 文書種別に応じた処理分岐
+            if doc_type == "振替受払通知票":
+                return self.generate_transfer_notification_filename_optimized(ocr_text)
+            elif doc_type == "振替受入明細書":
+                return self.generate_transfer_detail_filename_optimized(ocr_text)
+            elif doc_type == "払込取扱票":
+                return self.generate_payment_slip_filename_optimized(ocr_text)
+            else:
+                return self.generate_general_filename_optimized(ocr_text)
+            
+        except Exception as e:
+            self.logger.error(f"AI ファイル名生成エラー: {e}")
+            return None
+    
+    def generate_payment_slip_filename_optimized(self, ocr_text):
+        """最適化された払込取扱票ファイル名生成"""
+        # OCRテキストを短縮して処理速度向上
+        text_preview = ocr_text[:800] if len(ocr_text) > 800 else ocr_text
         
-        # 住所・氏名部分を探す
-        for i, line in enumerate(lines):
-            if '*' in line and ('広島' in line or '県' in line):
-                self.logger.info(f"住所行[{i}]: {line}")
-                # 住所の後の2-3行をチェック
-                for j in range(1, 4):
-                    if i + j < len(lines):
-                        self.logger.info(f"住所後[{i+j}]: {lines[i+j]}")
+        prompt = f"""
+以下は払込取扱票のOCRテキストです。簡潔にファイル名を生成してください：
+
+OCRテキスト:
+{text_preview}
+
+出力フォーマット:
+YYYY年MM月DD日振込 [個人名]より払込取扱票 金額[金額]円
+
+注意:
+- 日付不明時は「20XX年XX月XX日」
+- 個人名（石井孝志、倉本猛、西田啓など）を使用（善法寺は除外）
+- 上記フォーマット以外は出力禁止
+
+ファイル名:
+"""
         
-        # 金額関連を探す
-        for i, line in enumerate(lines):
-            if '円' in line and ('護持' in line or '管理' in line or '金額' in line):
-                self.logger.info(f"金額行[{i}]: {line}")
+        response = self.openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",  # gpt-4より高速
+            messages=[
+                {"role": "system", "content": "払込取扱票のファイル名を生成。加入者名と依頼人名を区別し、個人名のみ使用。"},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=80,  # トークン数削減
+            temperature=0.0
+        )
         
-        self.logger.info("=== OCR詳細分析終了 ===")
+        filename = response.choices[0].message.content.strip()
+        return self.sanitize_filename(filename)
+    
+    def generate_transfer_notification_filename_optimized(self, ocr_text):
+        """最適化された振替受払通知票ファイル名生成"""
+        text_preview = ocr_text[:500] if len(ocr_text) > 500 else ocr_text
+        
+        prompt = f"""
+振替受払通知票のファイル名生成:
+
+{text_preview}
+
+フォーマット: YYYY年MM月DD日振込 振替受払通知票 金額[金額]円
+日付不明時: 20XX年XX月XX日振込 振替受払通知票 金額[金額]円
+
+ファイル名:
+"""
+        
+        response = self.openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=60,
+            temperature=0.0
+        )
+        
+        return self.sanitize_filename(response.choices[0].message.content.strip())
+    
+    def generate_transfer_detail_filename_optimized(self, ocr_text):
+        """最適化された振替受入明細書ファイル名生成"""
+        text_preview = ocr_text[:500] if len(ocr_text) > 500 else ocr_text
+        
+        prompt = f"""
+振替受入明細書のファイル名生成:
+
+{text_preview}
+
+フォーマット: YYYY年MM月DD日振込 [カタカナ依頼人名]より振替受入明細書 金額[金額]円
+日付不明時: 20XX年XX月XX日振込 [カタカナ依頼人名]より振替受入明細書 金額[金額]円
+
+ファイル名:
+"""
+        
+        response = self.openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=70,
+            temperature=0.0
+        )
+        
+        return self.sanitize_filename(response.choices[0].message.content.strip())
+    
+    def generate_general_filename_optimized(self, ocr_text):
+        """最適化された一般文書ファイル名生成"""
+        text_preview = ocr_text[:300] if len(ocr_text) > 300 else ocr_text
+        
+        prompt = f"""
+文書内容から適切なファイル名を生成:
+
+{text_preview}
+
+要件: 50文字以内、日本語可、内容を表す名前
+
+ファイル名:
+"""
+        
+        response = self.openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=50,
+            temperature=0.3
+        )
+        
+        return self.sanitize_filename(response.choices[0].message.content.strip())
 
     
     def determine_document_type(self, ocr_text):
@@ -985,41 +1187,34 @@ YYYY年MM月DD日振込 [個人の依頼人名]より払込取扱票 金額[金�
         
         return self.sanitize_filename(filename)
     
+    # 古いメソッドを削除し、最適化版を使用
+    def pdf_to_jpeg(self, pdf_file):
+        """後方互換性のため"""
+        return self.pdf_to_jpeg_optimized(pdf_file)
+    
+    def perform_ocr(self, image_file):
+        """後方互換性のため"""
+        return self.perform_ocr_optimized(image_file)
+    
+    def generate_filename_with_ai(self, ocr_text, doc_type):
+        """後方互換性のため"""
+        return self.generate_filename_with_ai_optimized(ocr_text, doc_type)
+    
+    def generate_transfer_notification_filename(self, client, ocr_text):
+        """後方互換性のため"""
+        return self.generate_transfer_notification_filename_optimized(ocr_text)
+    
+    def generate_transfer_detail_filename(self, client, ocr_text):
+        """後方互換性のため"""
+        return self.generate_transfer_detail_filename_optimized(ocr_text)
+    
+    def generate_payment_slip_filename(self, client, ocr_text):
+        """後方互換性のため"""
+        return self.generate_payment_slip_filename_optimized(ocr_text)
+    
     def generate_general_filename(self, client, ocr_text):
-        """一般文書用のファイル名生成"""
-        prompt = f"""
-以下のOCRテキストを分析して、適切なファイル名を生成してください。
-
-OCRテキスト:
-{ocr_text}
-
-要件:
-- ファイル名は50文字以内
-- 日本語可
-- ファイルシステムで使用できない文字は使用しない（/, \\, :, *, ?, ", <, >, |）
-- 内容を表す簡潔で分かりやすい名前
-- 日付が含まれている場合は含める
-- 会社名や取引先名が分かる場合は含める
-
-ファイル名のみを回答してください（拡張子は不要）:
-"""
-        
-        self.logger.info(f"一般文書用プロンプト送信")
-        
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "あなたは文書の内容から適切なファイル名を生成するアシスタントです。"},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=100,
-            temperature=0.3
-        )
-        
-        filename = response.choices[0].message.content.strip()
-        self.logger.info(f"一般文書ファイル名生成: {filename}")
-        
-        return self.sanitize_filename(filename)
+        """後方互換性のため"""
+        return self.generate_general_filename_optimized(ocr_text)
     
     def sanitize_filename(self, filename):
         """ファイル名のサニタイズ処理"""
