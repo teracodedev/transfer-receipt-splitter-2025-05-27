@@ -624,7 +624,97 @@ class ZipExtractorGUI:
             
             client = OpenAI(api_key=api_key)
             
-            prompt = f"""
+            # 払込取扱票の判定（複数のキーワードで判定）
+            payment_keywords = [
+                "口座記号番号はお間違えのないよう記入してください",
+                "口座記号・番号はお間違えのないよう記入してください", 
+                "払达取扱",
+                "払込取扱票",
+                "ご依頼人欄",
+                "通信欄"
+            ]
+            
+            is_payment_slip = any(keyword in ocr_text for keyword in payment_keywords)
+            
+            if is_payment_slip:
+                self.logger.info("払込取扱票を検出 - 専用フォーマットでファイル名生成")
+                self.logger.info(f"検出されたキーワード: {[kw for kw in payment_keywords if kw in ocr_text]}")
+                return self.generate_payment_slip_filename(client, ocr_text)
+            else:
+                self.logger.info("一般文書として処理")
+                return self.generate_general_filename(client, ocr_text)
+            
+        except Exception as e:
+            self.logger.error(f"AI ファイル名生成エラー: {e}")
+            print(f"AI ファイル名生成エラー: {e}")
+            return None
+    
+    def generate_payment_slip_filename(self, client, ocr_text):
+        """払込取扱票専用のファイル名生成"""
+        prompt = f"""
+以下は払込取扱票のOCRテキストです。この内容から以下の情報を抽出してファイル名を生成してください：
+
+OCRテキスト:
+{ocr_text}
+
+抽出する情報:
+1. 取扱年月日（振込日）- 払込取扱票の右上にある年月日
+2. ご依頼人名 - ご依頼人欄に記載された氏名（姓名を含む）
+3. 護持会費の金額
+4. 墓地管理費の金額
+5. 合計金額（護持会費 + 墓地管理費の合計、または記載されている金額）
+
+出力ルール:
+- 必ず以下のフォーマットで出力してください
+- フォーマット: YYYY年MM月DD日振込 [依頼人名]より護持会費・墓地管理費 金額[合計金額]円
+
+例:
+- 2024年12月26日振込 香川基吉より護持会費・墓地管理費 金額14500円
+- 2025年5月14日振込 西田啓より護持会費・墓地管理費 金額5000円
+
+注意事項:
+- 取扱年月日は西暦4桁で統一
+- 依頼人名は正確な氏名を使用（姓名の間にスペースは入れない）
+- 金額はカンマなしの数字のみ
+- 護持会費のみの場合でも「護持会費・墓地管理費」と記載
+- 上記フォーマット以外は絶対に出力しない
+
+ファイル名:
+"""
+        
+        self.logger.info(f"払込取扱票用プロンプト送信")
+        
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "あなたは払込取扱票から正確に情報を抽出してファイル名を生成する専門アシスタントです。指定されたフォーマットに厳密に従い、取扱年月日（右上の日付）を振込日として使用してください。"},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=150,
+            temperature=0.1  # より一貫性のある結果のために低い値
+        )
+        
+        filename = response.choices[0].message.content.strip()
+        self.logger.info(f"払込取扱票ファイル名生成: {filename}")
+        
+        # ファイルシステムで使用できない文字を除去
+        invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+        original_filename = filename
+        for char in invalid_chars:
+            filename = filename.replace(char, '_')
+        
+        if original_filename != filename:
+            self.logger.info(f"無効文字を置換: {original_filename} → {filename}")
+        
+        final_filename = filename[:50]  # 50文字制限
+        if len(filename) > 50:
+            self.logger.info(f"ファイル名を50文字に短縮: {filename} → {final_filename}")
+        
+        return final_filename
+    
+    def generate_general_filename(self, client, ocr_text):
+        """一般文書用のファイル名生成"""
+        prompt = f"""
 以下のOCRテキストを分析して、適切なファイル名を生成してください。
 
 OCRテキスト:
@@ -640,41 +730,36 @@ OCRテキスト:
 
 ファイル名のみを回答してください（拡張子は不要）:
 """
-            
-            self.logger.info(f"OpenAI API呼び出し開始 (model: gpt-3.5-turbo)")
-            
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "あなたは文書の内容から適切なファイル名を生成するアシスタントです。"},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=100,
-                temperature=0.3
-            )
-            
-            filename = response.choices[0].message.content.strip()
-            self.logger.info(f"AI生成ファイル名: {filename}")
-            
-            # ファイルシステムで使用できない文字を除去
-            invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
-            original_filename = filename
-            for char in invalid_chars:
-                filename = filename.replace(char, '_')
-            
-            if original_filename != filename:
-                self.logger.info(f"無効文字を置換: {original_filename} → {filename}")
-            
-            final_filename = filename[:50]  # 50文字制限
-            if len(filename) > 50:
-                self.logger.info(f"ファイル名を50文字に短縮: {filename} → {final_filename}")
-            
-            return final_filename
-            
-        except Exception as e:
-            self.logger.error(f"AI ファイル名生成エラー: {e}")
-            print(f"AI ファイル名生成エラー: {e}")
-            return None
+        
+        self.logger.info(f"一般文書用プロンプト送信")
+        
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "あなたは文書の内容から適切なファイル名を生成するアシスタントです。"},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=100,
+            temperature=0.3
+        )
+        
+        filename = response.choices[0].message.content.strip()
+        self.logger.info(f"一般文書ファイル名生成: {filename}")
+        
+        # ファイルシステムで使用できない文字を除去
+        invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+        original_filename = filename
+        for char in invalid_chars:
+            filename = filename.replace(char, '_')
+        
+        if original_filename != filename:
+            self.logger.info(f"無効文字を置換: {original_filename} → {filename}")
+        
+        final_filename = filename[:50]  # 50文字制限
+        if len(filename) > 50:
+            self.logger.info(f"ファイル名を50文字に短縮: {filename} → {final_filename}")
+        
+        return final_filename
     
     def rename_pdf_file(self, pdf_file, new_name):
         """PDFファイルをリネーム"""
