@@ -1,10 +1,19 @@
-# ZIP解凍&PDF分割ツール - 必要なライブラリ
+# Transfer Receipt Splitter - 必要なライブラリ
 
-# 設定ファイル(.env)読み込み用
+# 基本機能
 python-dotenv>=1.0.0
-
-# PDF分割機能用
 PyPDF2>=3.0.0
+
+# OCR & AI自動リネーム機能
+pdf2image>=1.16.0
+google-cloud-vision>=3.4.0
+openai>=1.0.0
+requests>=2.31.0
+
+# システム要件（pdf2image用）:
+# Windows: poppler-utils (https://github.com/oschwartz10612/poppler-windows/releases/)
+# Mac: brew install poppler
+# Linux: sudo apt-get install poppler-utils
 
 # 標準ライブラリ（インストール不要）:
 # - tkinter (GUI)
@@ -12,3 +21,4 @@ PyPDF2>=3.0.0
 # - threading (マルチスレッド処理)
 # - pathlib (パス操作)
 # - os (システム操作)
+# - base64, json (データ処理)
