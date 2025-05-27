@@ -1,0 +1,14 @@
+# ZIP解凍&PDF分割ツール - 必要なライブラリ
+
+# 設定ファイル(.env)読み込み用
+python-dotenv>=1.0.0
+
+# PDF分割機能用
+PyPDF2>=3.0.0
+
+# 標準ライブラリ（インストール不要）:
+# - tkinter (GUI)
+# - zipfile (ZIP解凍)
+# - threading (マルチスレッド処理)
+# - pathlib (パス操作)
+# - os (システム操作)

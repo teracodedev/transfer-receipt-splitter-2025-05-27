@@ -5,6 +5,11 @@ import os
 import threading
 from pathlib import Path
 from dotenv import load_dotenv
+try:
+    from PyPDF2 import PdfReader, PdfWriter
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
 
 class ZipExtractorGUI:
     def __init__(self, root):
@@ -90,7 +95,19 @@ class ZipExtractorGUI:
         # 上書きオプション
         self.overwrite_var = tk.BooleanVar()
         ttk.Checkbutton(options_frame, text="既存ファイルを上書きする", 
-                       variable=self.overwrite_var).grid(row=2, column=0, sticky=tk.W, pady=(10, 0))
+                       variable=self.overwrite_var).grid(row=2, column=0, sticky=tk.W, pady=(5, 0))
+        
+        # PDF分割オプション
+        self.split_pdf_var = tk.BooleanVar()
+        pdf_frame = ttk.Frame(options_frame)
+        pdf_frame.grid(row=3, column=0, sticky=tk.W, pady=(5, 0))
+        
+        if PDF_AVAILABLE:
+            ttk.Checkbutton(pdf_frame, text="PDFファイルを1ページずつ分割する", 
+                           variable=self.split_pdf_var).grid(row=0, column=0, sticky=tk.W)
+        else:
+            ttk.Label(pdf_frame, text="⚠️ PDF分割機能を使用するには 'pip install PyPDF2' が必要です", 
+                     foreground="orange").grid(row=0, column=0, sticky=tk.W)
         
         # ZIPファイル一覧
         list_frame = ttk.LabelFrame(main_frame, text="見つかったZIPファイル", padding="10")
@@ -228,6 +245,10 @@ class ZipExtractorGUI:
                     # 選択フォルダ内に直接解凍
                     extract_path = folder
                 
+                # 前回の作業ファイルを削除（PDF分割機能が有効な場合）
+                if self.split_pdf_var.get() and PDF_AVAILABLE:
+                    self.cleanup_previous_files(extract_path)
+                
                 # ZIPファイルを解凍
                 with zipfile.ZipFile(zip_file, 'r') as zip_ref:
                     if self.overwrite_var.get():
@@ -239,6 +260,12 @@ class ZipExtractorGUI:
                             target_path = extract_path / member
                             if not target_path.exists():
                                 zip_ref.extract(member, extract_path)
+                
+                # PDF分割処理
+                if self.split_pdf_var.get() and PDF_AVAILABLE:
+                    self.progress_var.set(f"PDF分割中: {zip_file.name} ({i+1}/{total_files})")
+                    self.root.update_idletasks()
+                    self.split_pdfs_in_folder(extract_path)
                 
                 success_count += 1
                 
@@ -256,12 +283,63 @@ class ZipExtractorGUI:
                                  f"解凍完了: {success_count}/{total_files}\n\n"
                                  f"エラーが発生したファイル:\n{error_msg}")
         else:
-            messagebox.showinfo("完了", f"すべてのZIPファイル({total_files}個)の解凍が完了しました。")
+            pdf_msg = "とPDF分割" if self.split_pdf_var.get() and PDF_AVAILABLE else ""
+            messagebox.showinfo("完了", f"すべてのZIPファイル({total_files}個)の解凍{pdf_msg}が完了しました。")
         
         # UI状態をリセット
         self.progress_var.set("解凍完了")
         self.extract_button.config(state="normal")
         self.progress_bar.config(value=0)
+    
+    def cleanup_previous_files(self, folder_path):
+        """前回の作業ファイルを削除"""
+        try:
+            # 分割されたPDFファイル（_page_数字.pdf）を削除
+            for pdf_file in folder_path.glob("*_page_*.pdf"):
+                pdf_file.unlink()
+        except Exception as e:
+            print(f"前回ファイル削除エラー: {e}")
+    
+    def split_pdfs_in_folder(self, folder_path):
+        """フォルダ内のPDFファイルを1ページずつ分割"""
+        pdf_files = list(folder_path.glob("*.pdf"))
+        
+        for pdf_file in pdf_files:
+            # 既に分割されたファイルはスキップ
+            if "_page_" in pdf_file.stem:
+                continue
+                
+            try:
+                self.split_single_pdf(pdf_file)
+            except Exception as e:
+                print(f"PDF分割エラー ({pdf_file.name}): {e}")
+    
+    def split_single_pdf(self, pdf_file):
+        """単一のPDFファイルを1ページずつ分割"""
+        try:
+            # PDFを読み込み
+            with open(pdf_file, 'rb') as file:
+                reader = PdfReader(file)
+                total_pages = len(reader.pages)
+                
+                # 各ページを個別ファイルとして保存
+                for page_num in range(total_pages):
+                    writer = PdfWriter()
+                    writer.add_page(reader.pages[page_num])
+                    
+                    # 出力ファイル名を生成（ゼロパディング）
+                    page_filename = f"{pdf_file.stem}_page_{page_num + 1:03d}.pdf"
+                    output_path = pdf_file.parent / page_filename
+                    
+                    # ページを保存
+                    with open(output_path, 'wb') as output_file:
+                        writer.write(output_file)
+            
+            # 元のPDFファイルを削除
+            pdf_file.unlink()
+            
+        except Exception as e:
+            raise Exception(f"PDF分割処理失敗: {str(e)}")
 
 def main():
     root = tk.Tk()
