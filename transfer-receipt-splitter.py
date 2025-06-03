@@ -588,25 +588,11 @@ class ZipExtractorGUI:
             if doc_type == "払込取扱票" and self.logger.level <= logging.INFO:
                 self.analyze_payment_slip_ocr_brief(ocr_text)
             
-            # OpenAI APIでファイル名生成
-            start_ai = time.time()
-            new_name = self.generate_filename_with_ai_optimized(ocr_text, doc_type)
-            ai_time = time.time() - start_ai
-            self.logger.info(f"AI ファイル名生成完了: {ai_time:.1f}秒")
-            
-            # ファイルリネーム
-            if new_name:
-                old_name = pdf_file.name
-                self.rename_pdf_file(pdf_file, new_name)
-                self.logger.info(f"リネーム完了: {old_name} → {new_name}.pdf")
-            else:
-                self.logger.warning(f"ファイル名生成失敗: {pdf_file.name}")
-            
             # 一時的なJPEGファイルを削除
             if jpeg_file.exists():
                 jpeg_file.unlink()
             
-            total_time = time.time() - (start_convert + convert_time + ocr_time + ai_time)
+            total_time = time.time() - (start_convert + convert_time + ocr_time)
             self.logger.info(f"[{index+1}/{total_files}] 処理完了 (合計: {total_time:.1f}秒)")
                 
         except Exception as e:
@@ -685,134 +671,6 @@ class ZipExtractorGUI:
         if important_info:
             self.logger.info(f"重要情報: {'; '.join(important_info[:3])}")  # 最大3行まで
     
-    def generate_filename_with_ai_optimized(self, ocr_text, doc_type):
-        """最適化されたAIファイル名生成"""
-        try:
-            if not self.openai_client:
-                self.logger.error("OpenAI APIクライアントが初期化されていません")
-                return None
-            
-            # 文書種別に応じた処理分岐
-            if doc_type == "振替受払通知票":
-                return self.generate_transfer_notification_filename_optimized(ocr_text)
-            elif doc_type == "振替受入明細書":
-                return self.generate_transfer_detail_filename_optimized(ocr_text)
-            elif doc_type == "払込取扱票":
-                return self.generate_payment_slip_filename_optimized(ocr_text)
-            else:
-                return self.generate_general_filename_optimized(ocr_text)
-            
-        except Exception as e:
-            self.logger.error(f"AI ファイル名生成エラー: {e}")
-            return None
-    
-    def generate_payment_slip_filename_optimized(self, ocr_text):
-        """最適化された払込取扱票ファイル名生成"""
-        # OCRテキストを短縮して処理速度向上
-        text_preview = ocr_text[:800] if len(ocr_text) > 800 else ocr_text
-        
-        prompt = f"""
-以下は払込取扱票のOCRテキストです。簡潔にファイル名を生成してください：
-
-OCRテキスト:
-{text_preview}
-
-出力フォーマット:
-YYYY年MM月DD日振込 [個人名]より払込取扱票 金額[金額]円
-
-注意:
-- 日付不明時は「20XX年XX月XX日」
-- 個人名（石井孝志、倉本猛、西田啓など）を使用（善法寺は除外）
-- 上記フォーマット以外は出力禁止
-
-ファイル名:
-"""
-        
-        response = self.openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",  # gpt-4より高速
-            messages=[
-                {"role": "system", "content": "払込取扱票のファイル名を生成。加入者名と依頼人名を区別し、個人名のみ使用。"},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=80,  # トークン数削減
-            temperature=0.0
-        )
-        
-        filename = response.choices[0].message.content.strip()
-        return self.sanitize_filename(filename)
-    
-    def generate_transfer_notification_filename_optimized(self, ocr_text):
-        """最適化された振替受払通知票ファイル名生成"""
-        text_preview = ocr_text[:500] if len(ocr_text) > 500 else ocr_text
-        
-        prompt = f"""
-振替受払通知票のファイル名生成:
-
-{text_preview}
-
-フォーマット: YYYY年MM月DD日振込 振替受払通知票 金額[金額]円
-日付不明時: 20XX年XX月XX日振込 振替受払通知票 金額[金額]円
-
-ファイル名:
-"""
-        
-        response = self.openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=60,
-            temperature=0.0
-        )
-        
-        return self.sanitize_filename(response.choices[0].message.content.strip())
-    
-    def generate_transfer_detail_filename_optimized(self, ocr_text):
-        """最適化された振替受入明細書ファイル名生成"""
-        text_preview = ocr_text[:500] if len(ocr_text) > 500 else ocr_text
-        
-        prompt = f"""
-振替受入明細書のファイル名生成:
-
-{text_preview}
-
-フォーマット: YYYY年MM月DD日振込 [カタカナ依頼人名]より振替受入明細書 金額[金額]円
-日付不明時: 20XX年XX月XX日振込 [カタカナ依頼人名]より振替受入明細書 金額[金額]円
-
-ファイル名:
-"""
-        
-        response = self.openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=70,
-            temperature=0.0
-        )
-        
-        return self.sanitize_filename(response.choices[0].message.content.strip())
-    
-    def generate_general_filename_optimized(self, ocr_text):
-        """最適化された一般文書ファイル名生成"""
-        text_preview = ocr_text[:300] if len(ocr_text) > 300 else ocr_text
-        
-        prompt = f"""
-文書内容から適切なファイル名を生成:
-
-{text_preview}
-
-要件: 50文字以内、日本語可、内容を表す名前
-
-ファイル名:
-"""
-        
-        response = self.openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=50,
-            temperature=0.3
-        )
-        
-        return self.sanitize_filename(response.choices[0].message.content.strip())
-
-    
     def determine_document_type(self, ocr_text):
         """OCR結果から文書種別を判定"""
         self.logger.info(f"文書種別判定開始: OCR文字数={len(ocr_text)}")
@@ -860,47 +718,6 @@ YYYY年MM月DD日振込 [個人名]より払込取扱票 金額[金額]円
         # どれにも該当しない場合
         self.logger.info("判定結果: 一般文書")
         return "一般文書"
-    
-    def sanitize_filename(self, filename):
-        """ファイル名のサニタイズ処理"""
-        # ファイルシステムで使用できない文字を除去（アンダースコアは除外）
-        invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
-        original_filename = filename
-        for char in invalid_chars:
-            filename = filename.replace(char, '_')
-        
-        if original_filename != filename:
-            self.logger.info(f"無効文字を置換: {original_filename} → {filename}")
-        
-        final_filename = filename[:50]  # 50文字制限
-        if len(filename) > 50:
-            self.logger.info(f"ファイル名を50文字に短縮: {filename} → {final_filename}")
-        
-        return final_filename
-    
-    def rename_pdf_file(self, pdf_file, new_name):
-        """PDFファイルをリネーム"""
-        try:
-            if new_name:
-                new_path = pdf_file.parent / f"{new_name}.pdf"
-                original_new_path = new_path
-                
-                # ファイル名の重複を避ける
-                counter = 1
-                while new_path.exists():
-                    new_path = pdf_file.parent / f"{new_name}_{counter}.pdf"
-                    counter += 1
-                
-                if original_new_path != new_path:
-                    self.logger.info(f"ファイル名重複回避: {original_new_path.name} → {new_path.name}")
-                
-                old_path = pdf_file
-                pdf_file.rename(new_path)
-                self.logger.info(f"ファイルリネーム成功: {old_path.name} → {new_path.name}")
-                
-        except Exception as e:
-            self.logger.error(f"ファイルリネームエラー ({pdf_file.name}): {e}")
-            print(f"ファイルリネームエラー: {e}")
     
     def save_settings(self, *args):
         """設定を.envファイルに保存"""
