@@ -160,11 +160,11 @@ class ZipExtractorGUI:
     
     def setup_setting_callbacks(self):
         """設定変更時のコールバックを設定"""
-        self.extract_option.trace('w', self.save_settings)
-        self.overwrite_var.trace('w', self.save_settings)
-        self.split_pdf_var.trace('w', self.save_settings)
-        self.ocr_rename_var.trace('w', self.save_settings)
-        self.folder_path.trace('w', self.save_folder_setting)
+        self.extract_option.trace_add('write', self.save_settings)
+        self.overwrite_var.trace_add('write', self.save_settings)
+        self.split_pdf_var.trace_add('write', self.save_settings)
+        self.ocr_rename_var.trace_add('write', self.save_settings)
+        self.folder_path.trace_add('write', self.save_folder_setting)
     
     def get_default_folder(self):
         """デフォルトフォルダを取得"""
