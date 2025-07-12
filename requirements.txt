@@ -4,18 +4,6 @@
 python-dotenv>=1.0.0
 PyPDF2>=3.0.0
 
-# OCR & AI自動リネーム機能
-pdf2image>=1.16.0
-Pillow>=10.0.0
-google-cloud-vision>=3.4.0
-openai>=1.0.0
-requests>=2.31.0
-
-# システム要件（pdf2image用）:
-# Windows: poppler-utils (https://github.com/oschwartz10612/poppler-windows/releases/)
-# Mac: brew install poppler
-# Linux: sudo apt-get install poppler-utils
-
 # 標準ライブラリ（インストール不要）:
 # - tkinter (GUI)
 # - zipfile (ZIP解凍)
