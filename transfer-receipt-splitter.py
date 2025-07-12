@@ -12,6 +12,7 @@ from datetime import datetime
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
+import sys
 try:
     from PyPDF2 import PdfReader, PdfWriter
     PDF_AVAILABLE = True
@@ -97,29 +98,45 @@ class ZipExtractorGUI:
     
     def setup_logging(self):
         """ログ設定を初期化"""
-        # 実行中のPythonファイルと同じディレクトリにログファイルを作成
-        script_dir = Path(__file__).parent if '__file__' in globals() else Path.cwd()
-        log_file = script_dir / "transfer-receipt-splitter.log"
-        
-        # 前回のログファイルを削除
-        if log_file.exists():
-            log_file.unlink()
-        
-        # ログ設定
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_file, encoding='utf-8'),
-                logging.StreamHandler()  # コンソールにも出力
-            ]
-        )
-        
-        self.logger = logging.getLogger(__name__)
-        self.logger.info("=" * 50)
-        self.logger.info("Transfer Receipt Splitter 開始")
-        self.logger.info(f"ログファイル: {log_file}")
-        self.logger.info("=" * 50)
+        try:
+            # 実行中のPythonファイルと同じディレクトリにログファイルを作成
+            script_dir = Path(__file__).parent if '__file__' in globals() else Path.cwd()
+            log_file = script_dir / "transfer-receipt-splitter.log"
+            
+            # 前回のログファイルを削除
+            if log_file.exists():
+                try:
+                    log_file.unlink()
+                except Exception as e:
+                    print(f"ログファイル削除エラー: {e}")
+            
+            # ログ設定
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(levelname)s - %(message)s',
+                handlers=[
+                    logging.FileHandler(log_file, encoding='utf-8', mode='w'),
+                    logging.StreamHandler()  # コンソールにも出力
+                ]
+            )
+            
+            self.logger = logging.getLogger(__name__)
+            self.logger.info("=" * 50)
+            self.logger.info("Transfer Receipt Splitter 開始")
+            self.logger.info(f"ログファイル: {log_file}")
+            self.logger.info(f"Python バージョン: {sys.version}")
+            self.logger.info(f"作業ディレクトリ: {Path.cwd()}")
+            self.logger.info("=" * 50)
+            
+        except Exception as e:
+            print(f"ログ設定エラー: {e}")
+            # フォールバック: 基本的なログ設定
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(levelname)s - %(message)s'
+            )
+            self.logger = logging.getLogger(__name__)
+            self.logger.error(f"ログ設定失敗: {e}")
     
     def center_window(self):
         """ウィンドウを画面中央に配置"""
@@ -363,131 +380,172 @@ class ZipExtractorGUI:
     
     def extract_files(self):
         """ZIPファイルを解凍（並列処理対応）"""
-        folder = Path(self.folder_path.get())
-        zip_files = list(folder.glob("*.zip"))
-        total_files = len(zip_files)
-        
-        # プログレスバーの設定
-        self.progress_bar.config(maximum=total_files, value=0)
-        
-        success_count = 0
-        error_files = []
-        
-        start_time = time.time()
-        
-        for i, zip_file in enumerate(zip_files):
-            try:
-                # 進捗表示の更新
-                self.progress_var.set(f"解凍中: {zip_file.name} ({i+1}/{total_files})")
-                self.root.update_idletasks()
-                
-                self.logger.info(f"ZIP解凍開始: {zip_file.name} ({i+1}/{total_files})")
-                
-                # 解凍先の決定
-                if self.extract_option.get() == 1:
-                    # 各ZIPファイルごとに個別フォルダを作成
-                    extract_path = folder / zip_file.stem
+        try:
+            folder = Path(self.folder_path.get())
+            zip_files = list(folder.glob("*.zip"))
+            total_files = len(zip_files)
+            
+            if total_files == 0:
+                self.safe_update_ui(lambda: self.progress_var.set("ZIPファイルが見つかりませんでした。"))
+                self.safe_update_ui(lambda: self.extract_button.config(state="normal"))
+                return
+            
+            # プログレスバーの設定
+            self.safe_update_ui(lambda: self.progress_bar.config(maximum=total_files, value=0))
+            
+            success_count = 0
+            error_files = []
+            
+            start_time = time.time()
+            
+            for i, zip_file in enumerate(zip_files):
+                try:
+                    # 進捗表示の更新
+                    self.safe_update_ui(lambda f=zip_file, idx=i, total=total_files: 
+                                      self.progress_var.set(f"解凍中: {f.name} ({idx+1}/{total})"))
                     
-                    # 同名フォルダが存在する場合は削除
-                    if extract_path.exists():
-                        shutil.rmtree(extract_path)
+                    self.logger.info(f"ZIP解凍開始: {zip_file.name} ({i+1}/{total_files})")
                     
-                    extract_path.mkdir(exist_ok=True)
-                else:
-                    # 選択フォルダ内に直接解凍
-                    extract_path = folder
-                
-                # 前回の作業ファイルを削除（PDF分割機能が有効な場合）
-                if self.split_pdf_var.get() and PDF_AVAILABLE:
-                    self.cleanup_previous_files(extract_path)
-                
-                # ZIPファイルを解凍
-                with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-                    if self.overwrite_var.get():
-                        # 上書きする場合
-                        zip_ref.extractall(extract_path)
+                    # 解凍先の決定
+                    if self.extract_option.get() == 1:
+                        # 各ZIPファイルごとに個別フォルダを作成
+                        extract_path = folder / zip_file.stem
+                        
+                        # 同名フォルダが存在する場合は削除
+                        if extract_path.exists():
+                            shutil.rmtree(extract_path)
+                        
+                        extract_path.mkdir(exist_ok=True)
                     else:
-                        # 上書きしない場合は既存ファイルをチェック
-                        for member in zip_ref.namelist():
-                            target_path = extract_path / member
-                            if not target_path.exists():
-                                zip_ref.extract(member, extract_path)
-                
-                # PDF分割処理
-                if self.split_pdf_var.get() and PDF_AVAILABLE:
-                    self.progress_var.set(f"PDF分割中: {zip_file.name} ({i+1}/{total_files})")
-                    self.root.update_idletasks()
-                    split_files = self.split_pdfs_in_folder_optimized(extract_path)
+                        # 選択フォルダ内に直接解凍
+                        extract_path = folder
                     
-                    # OCR & AI自動リネーム処理
-                    if self.ocr_rename_var.get() and OCR_AVAILABLE and split_files:
-                        self.progress_var.set(f"OCR&リネーム中: {zip_file.name} ({i+1}/{total_files})")
-                        self.root.update_idletasks()
-                        self.process_ocr_and_rename(split_files)
+                    # 前回の作業ファイルを削除（PDF分割機能が有効な場合）
+                    if self.split_pdf_var.get() and PDF_AVAILABLE:
+                        self.cleanup_previous_files(extract_path)
+                    
+                    # ZIPファイルを解凍
+                    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                        if self.overwrite_var.get():
+                            # 上書きする場合
+                            zip_ref.extractall(extract_path)
+                        else:
+                            # 上書きしない場合は既存ファイルをチェック
+                            for member in zip_ref.namelist():
+                                target_path = extract_path / member
+                                if not target_path.exists():
+                                    zip_ref.extract(member, extract_path)
+                    
+                    # PDF分割処理
+                    if self.split_pdf_var.get() and PDF_AVAILABLE:
+                        self.safe_update_ui(lambda f=zip_file, idx=i, total=total_files: 
+                                          self.progress_var.set(f"PDF分割中: {f.name} ({idx+1}/{total})"))
+                        split_files = self.split_pdfs_in_folder_optimized(extract_path)
+                        
+                        # OCR & AI自動リネーム処理
+                        if self.ocr_rename_var.get() and OCR_AVAILABLE and split_files:
+                            self.safe_update_ui(lambda f=zip_file, idx=i, total=total_files: 
+                                              self.progress_var.set(f"OCR&リネーム中: {f.name} ({idx+1}/{total})"))
+                            self.process_ocr_and_rename(split_files)
+                    
+                    success_count += 1
+                    
+                except Exception as e:
+                    error_msg = f"{zip_file.name}: {str(e)}"
+                    error_files.append(error_msg)
+                    self.logger.error(f"ZIP処理エラー: {error_msg}")
+                    print(f"エラー詳細: {e}")  # コンソールにも出力
                 
-                success_count += 1
+                # プログレスバーの更新
+                self.safe_update_ui(lambda idx=i: self.progress_bar.config(value=idx+1))
+            
+            # 処理時間ログ
+            elapsed_time = time.time() - start_time
+            self.logger.info(f"全ZIP処理完了: {elapsed_time:.1f}秒")
+            
+            # 完了メッセージ
+            if error_files:
+                error_msg = "\n".join(error_files)
+                self.safe_update_ui(lambda: messagebox.showwarning("警告", 
+                                     f"解凍完了: {success_count}/{total_files}\n\n"
+                                     f"エラーが発生したファイル:\n{error_msg}"))
+            else:
+                features = []
+                if self.split_pdf_var.get() and PDF_AVAILABLE:
+                    features.append("PDF分割")
+                if self.ocr_rename_var.get() and OCR_AVAILABLE:
+                    features.append("OCR&AI自動リネーム")
                 
-            except Exception as e:
-                error_msg = f"{zip_file.name}: {str(e)}"
-                error_files.append(error_msg)
-                self.logger.error(f"ZIP処理エラー: {error_msg}")
+                feature_text = "と" + "・".join(features) if features else ""
+                self.safe_update_ui(lambda: messagebox.showinfo("完了", 
+                                  f"すべてのZIPファイル({total_files}個)の解凍{feature_text}が完了しました。\n"
+                                  f"処理時間: {elapsed_time:.1f}秒"))
             
-            # プログレスバーの更新
-            self.progress_bar.config(value=i+1)
-            self.root.update_idletasks()
-        
-        # 処理時間ログ
-        elapsed_time = time.time() - start_time
-        self.logger.info(f"全ZIP処理完了: {elapsed_time:.1f}秒")
-        
-        # 完了メッセージ
-        if error_files:
-            error_msg = "\n".join(error_files)
-            messagebox.showwarning("警告", 
-                                 f"解凍完了: {success_count}/{total_files}\n\n"
-                                 f"エラーが発生したファイル:\n{error_msg}")
-        else:
-            features = []
-            if self.split_pdf_var.get() and PDF_AVAILABLE:
-                features.append("PDF分割")
-            if self.ocr_rename_var.get() and OCR_AVAILABLE:
-                features.append("OCR&AI自動リネーム")
+            # UI状態をリセット
+            self.safe_update_ui(lambda: self.progress_var.set("解凍完了"))
+            self.safe_update_ui(lambda: self.extract_button.config(state="normal"))
+            self.safe_update_ui(lambda: self.progress_bar.config(value=0))
             
-            feature_text = "と" + "・".join(features) if features else ""
-            messagebox.showinfo("完了", 
-                              f"すべてのZIPファイル({total_files}個)の解凍{feature_text}が完了しました。\n"
-                              f"処理時間: {elapsed_time:.1f}秒")
-        
-        # UI状態をリセット
-        self.progress_var.set("解凍完了")
-        self.extract_button.config(state="normal")
-        self.progress_bar.config(value=0)
+        except Exception as e:
+            error_msg = f"解凍処理で予期しないエラーが発生しました: {str(e)}"
+            self.logger.error(error_msg)
+            print(f"致命的エラー: {e}")  # コンソールにも出力
+            self.safe_update_ui(lambda: messagebox.showerror("エラー", error_msg))
+            self.safe_update_ui(lambda: self.extract_button.config(state="normal"))
+            self.safe_update_ui(lambda: self.progress_var.set("エラーが発生しました"))
+    
+    def safe_update_ui(self, update_func):
+        """スレッドセーフなUI更新"""
+        try:
+            if threading.current_thread() is threading.main_thread():
+                update_func()
+            else:
+                self.root.after(0, update_func)
+        except Exception as e:
+            print(f"UI更新エラー: {e}")
+            self.logger.error(f"UI更新エラー: {e}")
     
     def split_pdfs_in_folder_optimized(self, folder_path):
         """最適化されたPDF分割処理"""
-        pdf_files = list(folder_path.glob("*.pdf"))
-        split_files = []
-        
-        # 並列処理でPDF分割を高速化
-        with ThreadPoolExecutor(max_workers=min(2, self.max_workers)) as executor:
-            future_to_pdf = {}
+        try:
+            pdf_files = list(folder_path.glob("*.pdf"))
+            split_files = []
             
-            for pdf_file in pdf_files:
-                # 既に分割されたファイルはスキップ
-                if "_page_" not in pdf_file.stem:
-                    future = executor.submit(self.split_single_pdf_optimized, pdf_file)
-                    future_to_pdf[future] = pdf_file
+            if not pdf_files:
+                self.logger.info("PDF分割: PDFファイルが見つかりませんでした")
+                return split_files
             
-            for future in as_completed(future_to_pdf):
-                try:
-                    result = future.result()
-                    if result:
-                        split_files.extend(result)
-                except Exception as e:
-                    pdf_file = future_to_pdf[future]
-                    self.logger.error(f"PDF分割エラー ({pdf_file.name}): {e}")
-        
-        return split_files
+            self.logger.info(f"PDF分割開始: {len(pdf_files)}個のPDFファイル")
+            
+            # 並列処理でPDF分割を高速化
+            with ThreadPoolExecutor(max_workers=min(2, self.max_workers)) as executor:
+                future_to_pdf = {}
+                
+                for pdf_file in pdf_files:
+                    # 既に分割されたファイルはスキップ
+                    if "_page_" not in pdf_file.stem:
+                        future = executor.submit(self.split_single_pdf_optimized, pdf_file)
+                        future_to_pdf[future] = pdf_file
+                
+                for future in as_completed(future_to_pdf):
+                    try:
+                        result = future.result()
+                        if result:
+                            split_files.extend(result)
+                    except Exception as e:
+                        pdf_file = future_to_pdf[future]
+                        error_msg = f"PDF分割エラー ({pdf_file.name}): {e}"
+                        self.logger.error(error_msg)
+                        print(f"PDF分割エラー: {error_msg}")  # コンソールにも出力
+            
+            self.logger.info(f"PDF分割完了: {len(split_files)}個のファイルに分割")
+            return split_files
+            
+        except Exception as e:
+            error_msg = f"PDF分割処理で予期しないエラー: {e}"
+            self.logger.error(error_msg)
+            print(f"PDF分割エラー: {error_msg}")  # コンソールにも出力
+            return []
     
     def split_single_pdf_optimized(self, pdf_file):
         """最適化された単一PDF分割"""
@@ -540,28 +598,40 @@ class ZipExtractorGUI:
     
     def process_ocr_and_rename(self, pdf_files):
         """OCRとAI自動リネーム処理（並列処理版）"""
-        self.logger.info(f"OCR&リネーム処理開始: {len(pdf_files)}個のPDFファイル (並列処理: {self.max_workers})")
-        
-        start_time = time.time()
-        
-        # 並列処理で高速化
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # タスクを投入
-            future_to_pdf = {
-                executor.submit(self.process_single_pdf, i, pdf_file, len(pdf_files)): pdf_file 
-                for i, pdf_file in enumerate(pdf_files)
-            }
+        try:
+            if not pdf_files:
+                self.logger.info("OCR処理: PDFファイルがありません")
+                return
             
-            # 結果を順次処理
-            for future in as_completed(future_to_pdf):
-                pdf_file = future_to_pdf[future]
-                try:
-                    future.result()
-                except Exception as e:
-                    self.logger.error(f"並列処理エラー ({pdf_file.name}): {e}")
-        
-        elapsed_time = time.time() - start_time
-        self.logger.info(f"OCR&リネーム処理完了 (処理時間: {elapsed_time:.1f}秒)")
+            self.logger.info(f"OCR&リネーム処理開始: {len(pdf_files)}個のPDFファイル (並列処理: {self.max_workers})")
+            
+            start_time = time.time()
+            
+            # 並列処理で高速化
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # タスクを投入
+                future_to_pdf = {
+                    executor.submit(self.process_single_pdf, i, pdf_file, len(pdf_files)): pdf_file 
+                    for i, pdf_file in enumerate(pdf_files)
+                }
+                
+                # 結果を順次処理
+                for future in as_completed(future_to_pdf):
+                    pdf_file = future_to_pdf[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        error_msg = f"並列処理エラー ({pdf_file.name}): {e}"
+                        self.logger.error(error_msg)
+                        print(f"OCR処理エラー: {error_msg}")  # コンソールにも出力
+            
+            elapsed_time = time.time() - start_time
+            self.logger.info(f"OCR&リネーム処理完了 (処理時間: {elapsed_time:.1f}秒)")
+            
+        except Exception as e:
+            error_msg = f"OCR処理で予期しないエラー: {e}"
+            self.logger.error(error_msg)
+            print(f"OCR処理エラー: {error_msg}")  # コンソールにも出力
     
     def process_single_pdf(self, index, pdf_file, total_files):
         """単一PDFファイルの処理"""
