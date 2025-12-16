@@ -23,7 +23,7 @@ class ZipExtractorGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Transfer Receipt Splitter - ZIP解凍&PDF分割ツール")
-        self.root.geometry("600x500")
+        self.root.geometry("600x550")
         self.root.resizable(True, True)
         
         # ログの設定
@@ -38,10 +38,19 @@ class ZipExtractorGUI:
         # 選択されたフォルダパス
         self.folder_path = tk.StringVar()
         
+        # PDF出力先フォルダパス
+        self.pdf_output_folder = tk.StringVar()
+        
         # 設定変数（.envファイルから読み込み、デフォルト値設定）
         self.extract_option = tk.IntVar(value=int(os.getenv('EXTRACT_OPTION', '1')))
         self.overwrite_var = tk.BooleanVar(value=os.getenv('OVERWRITE_FILES', 'True').lower() == 'true')
         self.split_pdf_var = tk.BooleanVar(value=os.getenv('SPLIT_PDF', 'True').lower() == 'true')
+        self.use_custom_output_var = tk.BooleanVar(value=os.getenv('USE_CUSTOM_OUTPUT', 'False').lower() == 'true')
+        
+        # 保存されたPDF出力先フォルダを読み込み
+        saved_pdf_output = os.getenv('PDF_OUTPUT_FOLDER')
+        if saved_pdf_output and Path(saved_pdf_output).exists():
+            self.pdf_output_folder.set(saved_pdf_output)
         
         # パフォーマンス設定
         self.max_workers = min(4, os.cpu_count() or 4)  # 並列処理数制限
@@ -64,6 +73,9 @@ class ZipExtractorGUI:
         
         # 設定変更時のコールバック設定
         self.setup_setting_callbacks()
+        
+        # 初期状態でPDF出力フォルダのUI状態を更新
+        self.toggle_pdf_output_folder()
     
     def setup_logging(self):
         """ログ設定を初期化"""
@@ -121,7 +133,7 @@ class ZipExtractorGUI:
         if window_width <= 1:
             window_width = 600
         if window_height <= 1:
-            window_height = 500
+            window_height = 550
         
         # 画面のサイズを取得
         screen_width = self.root.winfo_screenwidth()
@@ -150,7 +162,10 @@ class ZipExtractorGUI:
         self.extract_option.trace_add('write', self.save_settings)
         self.overwrite_var.trace_add('write', self.save_settings)
         self.split_pdf_var.trace_add('write', self.save_settings)
+        self.use_custom_output_var.trace_add('write', self.save_settings)
+        self.use_custom_output_var.trace_add('write', lambda *args: self.toggle_pdf_output_folder())
         self.folder_path.trace_add('write', self.save_folder_setting)
+        self.pdf_output_folder.trace_add('write', self.save_pdf_output_setting)
     
     def get_default_folder(self):
         """デフォルトフォルダを取得"""
@@ -187,7 +202,7 @@ class ZipExtractorGUI:
         folder_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         
         # フォルダパス表示
-        ttk.Label(folder_frame, text="選択フォルダ:").grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        ttk.Label(folder_frame, text="ZIPファイルのフォルダ:").grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
         
         path_frame = ttk.Frame(folder_frame)
         path_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
@@ -223,9 +238,40 @@ class ZipExtractorGUI:
             ttk.Label(pdf_frame, text="⚠️ PDF分割機能を使用するには 'pip install PyPDF2' が必要です", 
                      foreground="orange").grid(row=0, column=0, sticky=tk.W)
         
+        # PDF出力先フォルダ設定
+        pdf_output_frame = ttk.LabelFrame(main_frame, text="PDF分割出力先", padding="10")
+        pdf_output_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        pdf_output_frame.columnconfigure(0, weight=1)
+        
+        # カスタム出力先を使用するかどうかのチェックボックス
+        self.use_custom_output_check = ttk.Checkbutton(
+            pdf_output_frame, 
+            text="分割したPDFを別のフォルダに出力する", 
+            variable=self.use_custom_output_var
+        )
+        self.use_custom_output_check.grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        
+        # 出力先フォルダ選択
+        self.pdf_output_path_frame = ttk.Frame(pdf_output_frame)
+        self.pdf_output_path_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        self.pdf_output_path_frame.columnconfigure(0, weight=1)
+        
+        ttk.Label(self.pdf_output_path_frame, text="出力先フォルダ:").grid(row=0, column=0, sticky=tk.W, pady=(0, 3))
+        
+        output_entry_frame = ttk.Frame(self.pdf_output_path_frame)
+        output_entry_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        output_entry_frame.columnconfigure(0, weight=1)
+        
+        self.pdf_output_entry = ttk.Entry(output_entry_frame, textvariable=self.pdf_output_folder, width=50)
+        self.pdf_output_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 10))
+        
+        self.pdf_output_browse_btn = ttk.Button(output_entry_frame, text="参照", 
+                                                 command=self.select_pdf_output_folder, width=10)
+        self.pdf_output_browse_btn.grid(row=0, column=1)
+        
         # ZIPファイル一覧
         list_frame = ttk.LabelFrame(main_frame, text="見つかったZIPファイル", padding="10")
-        list_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        list_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
         list_frame.columnconfigure(0, weight=1)
         list_frame.rowconfigure(0, weight=1)
         
@@ -235,7 +281,7 @@ class ZipExtractorGUI:
         list_container.columnconfigure(0, weight=1)
         list_container.rowconfigure(0, weight=1)
         
-        self.zip_listbox = tk.Listbox(list_container, height=8)
+        self.zip_listbox = tk.Listbox(list_container, height=6)
         self.zip_listbox.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=self.zip_listbox.yview)
@@ -244,7 +290,7 @@ class ZipExtractorGUI:
         
         # 進捗表示
         progress_frame = ttk.Frame(main_frame)
-        progress_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        progress_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         progress_frame.columnconfigure(0, weight=1)
         
         self.progress_var = tk.StringVar(value="準備完了")
@@ -256,7 +302,7 @@ class ZipExtractorGUI:
         
         # ボタン部分
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=4, column=0, sticky=(tk.W, tk.E))
+        button_frame.grid(row=5, column=0, sticky=(tk.W, tk.E))
         
         ttk.Button(button_frame, text="再検索", command=self.scan_zip_files, 
                   width=15).grid(row=0, column=0, padx=(0, 10))
@@ -272,8 +318,28 @@ class ZipExtractorGUI:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(2, weight=1)
+        main_frame.rowconfigure(3, weight=1)
         folder_frame.columnconfigure(0, weight=1)
+    
+    def toggle_pdf_output_folder(self):
+        """PDF出力先フォルダの入力欄の有効/無効を切り替え"""
+        if self.use_custom_output_var.get():
+            self.pdf_output_entry.config(state="normal")
+            self.pdf_output_browse_btn.config(state="normal")
+        else:
+            self.pdf_output_entry.config(state="disabled")
+            self.pdf_output_browse_btn.config(state="disabled")
+    
+    def select_pdf_output_folder(self):
+        """PDF出力先フォルダ選択ダイアログを表示"""
+        initial_dir = self.pdf_output_folder.get() or self.folder_path.get() or str(self.default_folder)
+        
+        folder = filedialog.askdirectory(
+            title="分割したPDFの出力先フォルダを選択してください",
+            initialdir=initial_dir
+        )
+        if folder:
+            self.pdf_output_folder.set(folder)
         
     def select_folder(self):
         """フォルダ選択ダイアログを表示"""
@@ -326,11 +392,36 @@ class ZipExtractorGUI:
             messagebox.showwarning("警告", "解凍するZIPファイルがありません。")
             return
         
+        # カスタム出力先が有効で、フォルダが指定されていない場合は警告
+        if self.use_custom_output_var.get() and self.split_pdf_var.get():
+            if not self.pdf_output_folder.get():
+                messagebox.showwarning("警告", "PDF出力先フォルダを指定してください。")
+                return
+            output_path = Path(self.pdf_output_folder.get())
+            if not output_path.exists():
+                # フォルダが存在しない場合は作成するか確認
+                result = messagebox.askyesno("確認", 
+                    f"出力先フォルダが存在しません。\n{output_path}\n\n作成しますか？")
+                if result:
+                    try:
+                        output_path.mkdir(parents=True, exist_ok=True)
+                    except Exception as e:
+                        messagebox.showerror("エラー", f"フォルダの作成に失敗しました: {e}")
+                        return
+                else:
+                    return
+        
         # ボタンを無効化
         self.extract_button.config(state="disabled")
         
         # 別スレッドで解凍処理を実行
         threading.Thread(target=self.extract_files, daemon=True).start()
+    
+    def get_pdf_output_path(self, source_folder):
+        """PDF出力先パスを取得"""
+        if self.use_custom_output_var.get() and self.pdf_output_folder.get():
+            return Path(self.pdf_output_folder.get())
+        return source_folder
     
     def extract_files(self):
         """ZIPファイルを解凍し、PDFを1ページずつ分割"""
@@ -351,6 +442,13 @@ class ZipExtractorGUI:
             error_files = []
             
             start_time = time.time()
+            
+            # PDF出力先を取得
+            pdf_output_path = self.get_pdf_output_path(folder)
+            if self.use_custom_output_var.get() and self.split_pdf_var.get():
+                self.logger.info(f"PDF出力先フォルダ: {pdf_output_path}")
+                # カスタム出力先の場合は最初に1回だけクリーンアップ
+                self.cleanup_previous_files(pdf_output_path)
             
             for i, zip_file in enumerate(zip_files):
                 try:
@@ -374,7 +472,7 @@ class ZipExtractorGUI:
                         # 選択フォルダ内に直接解凍
                         extract_path = folder
                     
-                    # 前回の作業ファイルを削除（PDF分割機能が有効な場合）
+                    # 前回の作業ファイルを削除（PDF分割機能が有効な場合、解凍先フォルダのみ）
                     if self.split_pdf_var.get() and PDF_AVAILABLE:
                         self.cleanup_previous_files(extract_path)
                     
@@ -398,7 +496,10 @@ class ZipExtractorGUI:
                         self.safe_update_ui(lambda f=zip_file, idx=i, total=total_files: 
                                           self.progress_var.set(f"PDF分割中: {f.name} ({idx+1}/{total})"))
                         self.logger.info(f"PDF分割開始: {extract_path}")
-                        split_result = self.split_pdfs_in_folder(extract_path)
+                        
+                        # カスタム出力先を使用する場合
+                        output_folder = self.get_pdf_output_path(extract_path)
+                        split_result = self.split_pdfs_in_folder(extract_path, output_folder)
                         self.logger.info(f"PDF分割完了: {len(split_result)}個のファイルに分割")
                     
                     success_count += 1
@@ -428,9 +529,15 @@ class ZipExtractorGUI:
                     features.append("PDF分割")
                 
                 feature_text = "と" + "・".join(features) if features else ""
+                
+                # 出力先情報を追加
+                output_info = ""
+                if self.use_custom_output_var.get() and self.split_pdf_var.get():
+                    output_info = f"\n\nPDF出力先: {pdf_output_path}"
+                
                 self.safe_update_ui(lambda: messagebox.showinfo("完了", 
                                   f"すべてのZIPファイル({total_files}個)の解凍{feature_text}が完了しました。\n"
-                                  f"処理時間: {elapsed_time:.1f}秒"))
+                                  f"処理時間: {elapsed_time:.1f}秒{output_info}"))
             
             # UI状態をリセット
             self.safe_update_ui(lambda: self.progress_var.set("解凍完了"))
@@ -456,19 +563,28 @@ class ZipExtractorGUI:
             print(f"UI更新エラー: {e}")
             self.logger.error(f"UI更新エラー: {e}")
     
-    def split_pdfs_in_folder(self, folder_path):
-        """フォルダ内のPDFファイルを1ページずつ分割する"""
+    def split_pdfs_in_folder(self, source_folder, output_folder=None):
+        """フォルダ内のPDFファイルを1ページずつ分割する
+        
+        Args:
+            source_folder: PDFファイルがあるフォルダ
+            output_folder: 分割したPDFの出力先フォルダ（Noneの場合はsource_folderと同じ）
+        """
         split_files = []
+        
+        if output_folder is None:
+            output_folder = source_folder
         
         try:
             # フォルダ内のPDFファイルを取得
-            pdf_files = list(folder_path.glob("*.pdf"))
+            pdf_files = list(source_folder.glob("*.pdf"))
             
             if not pdf_files:
-                self.logger.info(f"PDF分割: PDFファイルが見つかりませんでした ({folder_path})")
+                self.logger.info(f"PDF分割: PDFファイルが見つかりませんでした ({source_folder})")
                 return split_files
             
             self.logger.info(f"PDF分割開始: {len(pdf_files)}個のPDFファイル")
+            self.logger.info(f"PDF出力先: {output_folder}")
             
             for pdf_file in pdf_files:
                 # 既に分割されたファイル（_page_が含まれる）はスキップ
@@ -477,7 +593,7 @@ class ZipExtractorGUI:
                     continue
                 
                 try:
-                    result = self.split_single_pdf(pdf_file)
+                    result = self.split_single_pdf(pdf_file, output_folder)
                     if result:
                         split_files.extend(result)
                         self.logger.info(f"PDF分割成功: {pdf_file.name} → {len(result)}ページ")
@@ -494,19 +610,24 @@ class ZipExtractorGUI:
             print(f"PDF分割エラー: {error_msg}")
             return split_files
     
-    def split_single_pdf(self, pdf_file):
+    def split_single_pdf(self, pdf_file, output_folder=None):
         """単一のPDFファイルを1ページずつ分割する
         
         Args:
             pdf_file: 分割するPDFファイルのPathオブジェクト
+            output_folder: 分割したPDFの出力先フォルダ（Noneの場合は元のファイルと同じ場所）
             
         Returns:
             分割されたPDFファイルのパスのリスト
         """
         split_files = []
         
+        if output_folder is None:
+            output_folder = pdf_file.parent
+        
         try:
             self.logger.info(f"PDF分割開始: {pdf_file.name}")
+            self.logger.info(f"  出力先: {output_folder}")
             
             # PDFを開く
             with open(pdf_file, 'rb') as file:
@@ -522,7 +643,7 @@ class ZipExtractorGUI:
                     
                     # 出力ファイル名を生成（元のファイル名_page_001.pdf 形式）
                     page_filename = f"{pdf_file.stem}_page_{page_num + 1:03d}.pdf"
-                    output_path = pdf_file.parent / page_filename
+                    output_path = output_folder / page_filename
                     
                     # PDFを書き込み
                     with open(output_path, 'wb') as output_file:
@@ -551,7 +672,7 @@ class ZipExtractorGUI:
                 pdf_file.unlink()
             
             if deleted_files:
-                self.logger.info(f"前回ファイル削除: {len(deleted_files)}個")
+                self.logger.info(f"前回ファイル削除: {len(deleted_files)}個 ({folder_path})")
             
         except Exception as e:
             self.logger.error(f"前回ファイル削除エラー: {e}")
@@ -562,7 +683,8 @@ class ZipExtractorGUI:
             self.update_env_file({
                 'EXTRACT_OPTION': str(self.extract_option.get()),
                 'OVERWRITE_FILES': str(self.overwrite_var.get()),
-                'SPLIT_PDF': str(self.split_pdf_var.get())
+                'SPLIT_PDF': str(self.split_pdf_var.get()),
+                'USE_CUSTOM_OUTPUT': str(self.use_custom_output_var.get())
             })
         except Exception as e:
             print(f"設定保存エラー: {e}")
@@ -574,6 +696,14 @@ class ZipExtractorGUI:
                 self.update_env_file({'LAST_FOLDER': self.folder_path.get()})
         except Exception as e:
             print(f"フォルダ設定保存エラー: {e}")
+    
+    def save_pdf_output_setting(self, *args):
+        """PDF出力先フォルダ設定を.envファイルに保存"""
+        try:
+            if self.pdf_output_folder.get():
+                self.update_env_file({'PDF_OUTPUT_FOLDER': self.pdf_output_folder.get()})
+        except Exception as e:
+            print(f"PDF出力先設定保存エラー: {e}")
     
     def update_env_file(self, new_settings):
         """環境変数ファイルを更新"""
@@ -605,10 +735,14 @@ class ZipExtractorGUI:
             if 'LAST_FOLDER' in existing_settings:
                 f.write(f"LAST_FOLDER={existing_settings['LAST_FOLDER']}\n")
             
+            # PDF出力先フォルダ
+            if 'PDF_OUTPUT_FOLDER' in existing_settings:
+                f.write(f"PDF_OUTPUT_FOLDER={existing_settings['PDF_OUTPUT_FOLDER']}\n")
+            
             f.write("\n# UI設定\n")
             
             # UI設定
-            ui_settings = ['EXTRACT_OPTION', 'OVERWRITE_FILES', 'SPLIT_PDF']
+            ui_settings = ['EXTRACT_OPTION', 'OVERWRITE_FILES', 'SPLIT_PDF', 'USE_CUSTOM_OUTPUT']
             for key in ui_settings:
                 if key in existing_settings:
                     f.write(f"{key}={existing_settings[key]}\n")
