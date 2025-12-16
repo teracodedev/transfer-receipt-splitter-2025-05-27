@@ -502,6 +502,61 @@ class ZipExtractorGUI:
                         split_result = self.split_pdfs_in_folder(extract_path, output_folder)
                         self.logger.info(f"PDF分割完了: {len(split_result)}個のファイルに分割")
                     
+                    # 各ZIPファイルごとに個別フォルダを作成した場合、処理完了後にフォルダを削除
+                    if self.extract_option.get() == 1:
+                        # ファイルハンドルが確実に閉じられるまで少し待機
+                        time.sleep(0.1)
+                        
+                        # フォルダ削除をリトライ付きで実行
+                        max_retries = 3
+                        retry_delay = 0.5
+                        deleted = False
+                        
+                        for attempt in range(max_retries):
+                            try:
+                                if extract_path.exists() and extract_path.is_dir():
+                                    # フォルダ内のファイル一覧をログに記録（デバッグ用）
+                                    if attempt == 0:
+                                        try:
+                                            remaining_files = list(extract_path.iterdir())
+                                            if remaining_files:
+                                                self.logger.info(f"削除前のフォルダ内容: {[f.name for f in remaining_files]}")
+                                        except Exception as e:
+                                            self.logger.warning(f"フォルダ内容の確認エラー: {e}")
+                                    
+                                    # フォルダを削除
+                                    shutil.rmtree(extract_path)
+                                    self.logger.info(f"解凍フォルダ削除完了: {extract_path}")
+                                    
+                                    # 削除が成功したか確認
+                                    if not extract_path.exists():
+                                        deleted = True
+                                        break
+                                    else:
+                                        self.logger.warning(f"削除後もフォルダが存在します（リトライ {attempt + 1}/{max_retries}）: {extract_path}")
+                                        if attempt < max_retries - 1:
+                                            time.sleep(retry_delay)
+                            except PermissionError as e:
+                                error_msg = f"フォルダ削除失敗（アクセス権限エラー）: {extract_path} - {e}"
+                                self.logger.error(error_msg)
+                                if attempt < max_retries - 1:
+                                    self.logger.info(f"リトライします（{attempt + 1}/{max_retries}）...")
+                                    time.sleep(retry_delay)
+                                else:
+                                    print(f"エラー: {error_msg}")
+                            except Exception as e:
+                                error_msg = f"フォルダ削除失敗: {extract_path} - {e}"
+                                self.logger.error(error_msg)
+                                if attempt < max_retries - 1:
+                                    self.logger.info(f"リトライします（{attempt + 1}/{max_retries}）...")
+                                    time.sleep(retry_delay)
+                                else:
+                                    print(f"エラー: {error_msg}")
+                        
+                        if not deleted and extract_path.exists():
+                            self.logger.error(f"警告: フォルダの削除に失敗しました（{max_retries}回試行）: {extract_path}")
+                            print(f"警告: フォルダの削除に失敗しました: {extract_path}")
+                    
                     success_count += 1
                     
                 except Exception as e:
