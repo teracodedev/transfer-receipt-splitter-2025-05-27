@@ -95,6 +95,7 @@ class ZipExtractorGUI:
             self.logger.info(f"ログファイル: {log_file}")
             self.logger.info(f"Python バージョン: {sys.version}")
             self.logger.info(f"作業ディレクトリ: {Path.cwd()}")
+            self.logger.info(f"PDF分割機能: {'有効' if PDF_AVAILABLE else '無効 (PyPDF2が必要)'}")
             self.logger.info("=" * 50)
             
         except Exception as e:
@@ -332,7 +333,7 @@ class ZipExtractorGUI:
         threading.Thread(target=self.extract_files, daemon=True).start()
     
     def extract_files(self):
-        """ZIPファイルを解凍（並列処理対応）"""
+        """ZIPファイルを解凍し、PDFを1ページずつ分割"""
         try:
             folder = Path(self.folder_path.get())
             zip_files = list(folder.glob("*.zip"))
@@ -378,6 +379,7 @@ class ZipExtractorGUI:
                         self.cleanup_previous_files(extract_path)
                     
                     # ZIPファイルを解凍
+                    self.logger.info(f"ZIP解凍先: {extract_path}")
                     with zipfile.ZipFile(zip_file, 'r') as zip_ref:
                         if self.overwrite_var.get():
                             # 上書きする場合
@@ -389,11 +391,15 @@ class ZipExtractorGUI:
                                 if not target_path.exists():
                                     zip_ref.extract(member, extract_path)
                     
-                    # PDF分割処理
+                    self.logger.info(f"ZIP解凍完了: {zip_file.name}")
+                    
+                    # PDF分割処理（解凍後に実行）
                     if self.split_pdf_var.get() and PDF_AVAILABLE:
                         self.safe_update_ui(lambda f=zip_file, idx=i, total=total_files: 
                                           self.progress_var.set(f"PDF分割中: {f.name} ({idx+1}/{total})"))
-                        self.split_pdfs_in_folder_optimized(extract_path)
+                        self.logger.info(f"PDF分割開始: {extract_path}")
+                        split_result = self.split_pdfs_in_folder(extract_path)
+                        self.logger.info(f"PDF分割完了: {len(split_result)}個のファイルに分割")
                     
                     success_count += 1
                     
@@ -450,85 +456,94 @@ class ZipExtractorGUI:
             print(f"UI更新エラー: {e}")
             self.logger.error(f"UI更新エラー: {e}")
     
-    def split_pdfs_in_folder_optimized(self, folder_path):
-        """最適化されたPDF分割処理"""
+    def split_pdfs_in_folder(self, folder_path):
+        """フォルダ内のPDFファイルを1ページずつ分割する"""
+        split_files = []
+        
         try:
+            # フォルダ内のPDFファイルを取得
             pdf_files = list(folder_path.glob("*.pdf"))
-            split_files = []
             
             if not pdf_files:
-                self.logger.info("PDF分割: PDFファイルが見つかりませんでした")
+                self.logger.info(f"PDF分割: PDFファイルが見つかりませんでした ({folder_path})")
                 return split_files
             
             self.logger.info(f"PDF分割開始: {len(pdf_files)}個のPDFファイル")
             
-            # 並列処理でPDF分割を高速化
-            with ThreadPoolExecutor(max_workers=min(2, self.max_workers)) as executor:
-                future_to_pdf = {}
+            for pdf_file in pdf_files:
+                # 既に分割されたファイル（_page_が含まれる）はスキップ
+                if "_page_" in pdf_file.stem:
+                    self.logger.info(f"スキップ（既に分割済み）: {pdf_file.name}")
+                    continue
                 
-                for pdf_file in pdf_files:
-                    # 既に分割されたファイルはスキップ
-                    if "_page_" not in pdf_file.stem:
-                        future = executor.submit(self.split_single_pdf_optimized, pdf_file)
-                        future_to_pdf[future] = pdf_file
-                
-                for future in as_completed(future_to_pdf):
-                    try:
-                        result = future.result()
-                        if result:
-                            split_files.extend(result)
-                    except Exception as e:
-                        pdf_file = future_to_pdf[future]
-                        error_msg = f"PDF分割エラー ({pdf_file.name}): {e}"
-                        self.logger.error(error_msg)
-                        print(f"PDF分割エラー: {error_msg}")  # コンソールにも出力
+                try:
+                    result = self.split_single_pdf(pdf_file)
+                    if result:
+                        split_files.extend(result)
+                        self.logger.info(f"PDF分割成功: {pdf_file.name} → {len(result)}ページ")
+                except Exception as e:
+                    self.logger.error(f"PDF分割エラー ({pdf_file.name}): {e}")
+                    print(f"PDF分割エラー: {pdf_file.name} - {e}")
             
-            self.logger.info(f"PDF分割完了: {len(split_files)}個のファイルに分割")
+            self.logger.info(f"PDF分割完了: 合計{len(split_files)}個のファイルに分割")
             return split_files
             
         except Exception as e:
             error_msg = f"PDF分割処理で予期しないエラー: {e}"
             self.logger.error(error_msg)
-            print(f"PDF分割エラー: {error_msg}")  # コンソールにも出力
-            return []
+            print(f"PDF分割エラー: {error_msg}")
+            return split_files
     
-    def split_single_pdf_optimized(self, pdf_file):
-        """最適化された単一PDF分割"""
+    def split_single_pdf(self, pdf_file):
+        """単一のPDFファイルを1ページずつ分割する
+        
+        Args:
+            pdf_file: 分割するPDFファイルのPathオブジェクト
+            
+        Returns:
+            分割されたPDFファイルのパスのリスト
+        """
         split_files = []
         
         try:
-            # メモリ効率を改善
+            self.logger.info(f"PDF分割開始: {pdf_file.name}")
+            
+            # PDFを開く
             with open(pdf_file, 'rb') as file:
                 reader = PdfReader(file)
                 total_pages = len(reader.pages)
                 
-                # バッチ処理で高速化
+                self.logger.info(f"  総ページ数: {total_pages}")
+                
+                # 各ページを個別のPDFとして保存
                 for page_num in range(total_pages):
                     writer = PdfWriter()
                     writer.add_page(reader.pages[page_num])
                     
-                    # 出力ファイル名を生成
+                    # 出力ファイル名を生成（元のファイル名_page_001.pdf 形式）
                     page_filename = f"{pdf_file.stem}_page_{page_num + 1:03d}.pdf"
                     output_path = pdf_file.parent / page_filename
                     
-                    # メモリ効率的な書き込み
+                    # PDFを書き込み
                     with open(output_path, 'wb') as output_file:
                         writer.write(output_file)
                     
                     split_files.append(output_path)
+                    self.logger.info(f"  ページ {page_num + 1}/{total_pages} 保存: {page_filename}")
             
             # 元のPDFファイルを削除
             pdf_file.unlink()
+            self.logger.info(f"元ファイル削除: {pdf_file.name}")
             
             return split_files
             
         except Exception as e:
-            raise Exception(f"PDF分割処理失敗: {str(e)}")
+            raise Exception(f"PDF分割処理失敗 ({pdf_file.name}): {str(e)}")
     
     def cleanup_previous_files(self, folder_path):
-        """高速化された前回ファイル削除"""
+        """前回の分割ファイルを削除"""
         try:
-            # glob使用で高速化
+            # _page_を含むPDFファイルを検索して削除
             pattern = "*_page_*.pdf"
             deleted_files = list(folder_path.glob(pattern))
             
@@ -605,4 +620,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-                    
